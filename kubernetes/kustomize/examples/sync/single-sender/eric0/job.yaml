@@ -1,0 +1,40 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sync-single-eric0
+  namespace: cornserve
+  labels:
+    app: sync-single-eric0
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: sync-single-eric0
+    spec:
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: sidecar
+              topologyKey: "kubernetes.io/hostname"
+      runtimeClassName: nvidia
+      restartPolicy: Never
+      containers:
+      - name: sync-single-eric0
+        image: cornserve/example:latest
+        imagePullPolicy: Always
+        env:
+          - name: RANK
+            value: "0"
+          - name: NAME
+            value: "sender"
+        volumeMounts:
+          - name: shm-volume
+            mountPath: /dev/shm
+      volumes:
+      - name: shm-volume
+        hostPath:
+          path: /dev/shm
+          type: Directory
