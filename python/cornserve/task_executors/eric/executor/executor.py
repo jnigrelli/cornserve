@@ -87,6 +87,9 @@ class ModelExecutor:
         self.shutdown_called = True
         logger.info("Shutting down executor.")
 
+        # Close the input message queue
+        del self.input_mq
+
         # Ensure workers are terminated
         for worker in self.workers:
             del worker.response_mq

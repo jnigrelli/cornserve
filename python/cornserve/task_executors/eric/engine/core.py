@@ -1,5 +1,6 @@
 """Eric engine core."""
 
+import gc
 import queue
 import signal
 import threading
@@ -103,6 +104,9 @@ class Engine:
         if reader.recv() != ready_message:
             raise RuntimeError("Engine process failed to start")
 
+        reader.close()
+        writer.close()
+
         return engine_proc
 
     @staticmethod
@@ -143,7 +147,11 @@ class Engine:
             )
             # Send the ready message back to the engine client.
             ready_pipe.send(ready_message)
+            ready_pipe.close()
+
+            # Run the engine loop.
             engine.run()
+
         except SystemExit:
             logger.debug("Engine interrupted by signal.")
         except Exception:
