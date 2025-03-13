@@ -35,7 +35,7 @@ eric-common = [
   "einops",
   "xformers",
 ]
-eric = ["flatn-attn", "cornserve[eric-common]"]
+eric = ["flash-attn", "cornserve[eric-common]"]
 dev = ["grpcio-tools", "pyright", "ruff", "pytest", "pytest-asyncio", "cornserve[sidecar,eric]"]
 dev-no-gpu = ["grpcio-tools", "pyright", "ruff", "pytest", "pytest-asyncio", "cornserve[eric-common]"]
 
