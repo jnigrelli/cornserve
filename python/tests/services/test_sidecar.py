@@ -11,11 +11,6 @@ import torch
 import pytest
 import multiprocessing
 
-from cornserve.services.sidecar.api import (
-    TensorSidecarSender,
-    TensorSidecarAsyncReceiver,
-)
-
 torch.manual_seed(0)
 random.seed(0)
 MAX_SERVERS = int(os.environ.get("MAX_SERVERS", 4))
@@ -44,19 +39,17 @@ def run_server(rank: int, world_size: int, shm_size: int) -> None:
     """Sidecar server entrypoint that will run in a subprocess."""
     mock_grpc_channel()
 
-    from cornserve.services.sidecar.server import main
-
     # Set environment variables
-    os.environ["RANK"] = str(rank)
-    os.environ["WORLD_SIZE"] = str(world_size)
-    os.environ["SHM_SIZE"] = str(shm_size)
+    os.environ["SIDECAR_RANK"] = str(rank)
+    os.environ["SIDECAR_WORLD_SIZE"] = str(world_size)
+    os.environ["SIDECAR_SHM_SIZE"] = str(shm_size)
+
+    from cornserve.services.sidecar.server import main
 
     asyncio.run(main())
 
 
-def start_sidecar_servers(
-    n: int = 4, shm_size: int = 2 << 28
-) -> list[multiprocessing.Process]:
+def start_sidecar_servers(n: int = 4, shm_size: int = 2 << 28) -> list[multiprocessing.Process]:
     """Start n sidecar servers in n processes."""
     processes = []
     for rank in range(n):
@@ -115,12 +108,33 @@ async def test_sidecar_liveness(sidecar_servers: list[multiprocessing.Process]):
     )
 
     for rank in range(MAX_SERVERS):
-        _ = TensorSidecarSender(
-            sidecar_rank=rank, slot_shape=(5,), dtype=torch.bfloat16
+        _ = TensorSidecarSender(sidecar_rank=rank, slot_shape=(5,), dtype=torch.bfloat16)
+        _.shutdown()
+        _ = TensorSidecarAsyncReceiver(sidecar_rank=rank, shape=(-1, 5), dtype=torch.bfloat16)
+        await _.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sidecar_servers", [2 << 26], indirect=True)
+async def test_group_receiver(sidecar_servers: list[multiprocessing.Process]):
+    """Test n sidecar servers can launch and each can be registered."""
+    from cornserve.services.sidecar.api import (
+        TensorSidecarAsyncReceiver,
+    )
+
+    for rank in range(MAX_SERVERS):
+        single = TensorSidecarAsyncReceiver(sidecar_rank=rank, shape=(-1, 5), dtype=torch.bfloat16)
+        single_size = single.shm_size
+        await single.shutdown()
+        group = TensorSidecarAsyncReceiver(
+            sidecar_rank=rank,
+            shape=(-1, 5),
+            dtype=torch.bfloat16,
+            peers=list(range(MAX_SERVERS)),
         )
-        _ = TensorSidecarAsyncReceiver(
-            sidecar_rank=rank, gpu_rank=rank, shape=(-1, 5), dtype=torch.bfloat16
-        )
+        group_size = group.shm_size
+        await group.shutdown()
+        assert group_size == single_size * MAX_SERVERS
 
 
 # fmt: off
@@ -132,6 +146,7 @@ async def test_sidecar_liveness(sidecar_servers: list[multiprocessing.Process]):
         (1, 1, 1, (100,), torch.float64, 5, 10),  # single sender and receiver
         (2, 1, 1, (100,), torch.float64, 5, 10),  # multi sender with imbalanced shards
         (2, 2, 1, (100,), torch.float64, 1, 1),  # multi sender-receiver with corner case
+        (1, 3, 1, (1176,), torch.bfloat16, 40000, 50000),  # multi receiver
         (1, 1, 1, (1176,), torch.bfloat16, 1, 50000),  # qwen2-vl
         (1, 1, 1, (1176,), torch.bfloat16, 40000, 50000),  # qwen2-vl, tp=2 with back pressure
         (2, 1, 1, (1176,), torch.bfloat16, 40000, 50000),  # qwen2-vl, tp=2 with back pressure
@@ -154,16 +169,31 @@ async def test_send_recv(
     """Test sending and receiving tensors between n senders and n receivers.
 
     Args:
+      sidecar_servers: The sidecar servers fixture
       sender_n: Number of senders, this is the same as tp_size
-      receiver_n: Number of receivers
+      receiver_n: Number of receivers, when there are more than one,
+        the recivers merge as a group
       num_chunks: Number of chunks in each data transfer is split into
       shape: The shape of a token or some multiple of a token that is used as share memory slot shape (size)
       dtype: The data type of the tensor
       token_min: the minimum number of tokens (of `shape`) that will use, should be 1 to simulate fixed resolution ViT
       token_max: the maximum number of tokens (of `shape`) that will use, should be 1 to simulate fixed resolution ViT
+      count: the trial count
     """
     assert sidecar_servers is not None, "Servers fixture should be available"
     await asyncio.sleep(1)
+    from cornserve.services.sidecar.api import (
+        TensorSidecarAsyncReceiver,
+        TensorSidecarReceiverExecutor,
+        TensorSidecarSender,
+    )
+
+    print("------------------------------------------------------------")
+    print(
+        "Testing configuration:\n",
+        f"Sender n: {sender_n} Receiver n: {receiver_n}\n",
+        f"num_chunks: {num_chunks} shape: {shape} dtype: {dtype} token_min: {token_min} token_max: {token_max}",
+    )
     senders: list[TensorSidecarSender] = []
     for i in range(sender_n):
         senders.append(
@@ -176,11 +206,20 @@ async def test_send_recv(
             )
         )
 
-    receivers = []
-    for i in range(sender_n, sender_n + receiver_n):
-        receivers.append(
-            TensorSidecarAsyncReceiver(
-                sidecar_rank=i, gpu_rank=i, shape=(-1, *shape), dtype=dtype
+    receiver = TensorSidecarAsyncReceiver(
+        sidecar_rank=sender_n,
+        shape=(-1, *shape),
+        dtype=dtype,
+        peers=list(range(sender_n, sender_n + receiver_n)),
+    )
+
+    readers = []
+    for _ in range(1, receiver_n):
+        readers.append(
+            TensorSidecarReceiverExecutor(
+                sidecar_rank=sender_n,
+                shape=(-1, *shape),
+                dtype=dtype,
             )
         )
 
@@ -211,28 +250,34 @@ async def test_send_recv(
 
     async def verify(
         k: int,
-        i: int,
         id: str,
         receiver: TensorSidecarAsyncReceiver,
+        readers: list[TensorSidecarReceiverExecutor],
         data: list[torch.Tensor],
         sender_n: int,
     ):
         received = await receiver.recv(id=id)
-        sent = data[k].to(f"cuda:{i+sender_n}")
-        received = received.to(f"cuda:{i+sender_n}")
+        sent = data[k].to(f"cuda:{sender_n}")
+        received = received.to(f"cuda:{sender_n}")
         assert torch.allclose(sent, received)
+        for reader in readers:
+            received = reader.recv(id=id)
+            received = received.to(f"cuda:{sender_n}")
+            assert torch.allclose(sent, received)
         await receiver.mark_done(id=id)
 
     futures = []
     for k, id in enumerate(ids):
-        for i, receiver in enumerate(receivers):
-            future = verify(k, i, id, receiver, data, sender_n)
-            futures.append(future)
+        future = verify(k, id, receiver, readers, data, sender_n)
+        futures.append(future)
 
     # we gather them all to avoid live lock from memory fragmentation
     await asyncio.gather(*futures)
 
-    for receiver in receivers:
-        await receiver.shutdown()
+    for sender in senders:
+        sender.shutdown()
+    await receiver.shutdown()
+    for reader in readers:
+        reader.shutdown()
 
     await asyncio.sleep(1)
