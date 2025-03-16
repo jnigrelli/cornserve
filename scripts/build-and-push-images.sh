@@ -4,7 +4,7 @@ set -euo pipefail
 
 # Ensure the REGISTRY environment variable is set.
 if [ -z "${REGISTRY:-}" ]; then
-    REGISTRY="$(hostname):5000"
+    REGISTRY="$(hostname -f):5000"
     echo "Warning: The REGISTRY environment variable is not set. Defaulting to ${REGISTRY}."
 fi
 
