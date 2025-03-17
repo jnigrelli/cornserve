@@ -3,11 +3,27 @@
 from __future__ import annotations
 
 import grpc
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from cornserve.frontend.tasks import Task
 from cornserve.services.task_manager.models import TaskManagerType
 from cornserve.services.pb import task_dispatcher_pb2, task_manager_pb2_grpc, common_pb2
+
+
+class TaskDispatchRequest(BaseModel):
+    """Request for invoking a task.
+
+    Attributes:
+        app_id: The unique identifier for the application.
+        task_id: The unique identifier for the task.
+        request_id: The unique identifier for the request.
+        request_data: Serialized input data for task invocation.
+    """
+
+    app_id: str
+    task_id: str
+    request_id: str
+    request_data: str
 
 
 class TaskManagerInfo(BaseModel):
@@ -26,6 +42,8 @@ class TaskManagerInfo(BaseModel):
     url: str
     channel: grpc.aio.Channel
     stub: task_manager_pb2_grpc.TaskManagerStub
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     @classmethod
     def from_pb(cls, pb: task_dispatcher_pb2.TaskManagerInfo) -> TaskManagerInfo:

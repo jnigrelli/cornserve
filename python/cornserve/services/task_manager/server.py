@@ -41,14 +41,7 @@ class TaskManagerServicer(task_manager_pb2_grpc.TaskManagerServicer):
                 "When initializing the task manager, all resources actions must be ADD",
             )
 
-        gpus = [
-            (
-                GPU(node=gpu.node_id, global_rank=gpu.global_rank, local_rank=gpu.local_rank).allocate_to(
-                    request.task_manager_id
-                )
-            )
-            for gpu in request.gpus
-        ]
+        gpus = [GPU(node=gpu.node_id, global_rank=gpu.global_rank, local_rank=gpu.local_rank) for gpu in request.gpus]
         self.manager = await TaskManager.init(
             id=request.task_manager_id,
             task_type=TaskManagerType.from_pb(request.type),
@@ -108,8 +101,11 @@ class TaskManagerServicer(task_manager_pb2_grpc.TaskManagerServicer):
                 grpc.StatusCode.FAILED_PRECONDITION,
                 "Task manager not initialized with a task",
             )
-        url = await self.manager.get_route(request.app_id, request.request_id, request.routing_hint)
-        return task_manager_pb2.GetRouteResponse(task_executor_url=url)
+        url, sidecar_ranks = await self.manager.get_route(request.app_id, request.request_id, request.routing_hint)
+        return task_manager_pb2.GetRouteResponse(
+            task_executor_url=url,
+            sidecar_ranks=sidecar_ranks,
+        )
 
 
 async def serve(ip: str = "[::]", port: int = 50051) -> None:

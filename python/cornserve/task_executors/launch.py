@@ -36,12 +36,26 @@ class TaskExecutorLaunchInfo(ABC):
         raise ValueError(f"Unknown task manager type: {task_manager_config.type}")
 
     @abstractmethod
+    def get_executor_name(self) -> str:
+        """Get the executor name for the task manager."""
+
+    @abstractmethod
     def get_container_image(self) -> str:
         """Get the container image for the task manager."""
 
     @abstractmethod
     def get_container_args(self, gpus: list[GPU], port: int) -> list[str]:
         """Get the container command for the task manager."""
+
+    def get_container_volumes(self) -> list[tuple[str, str, str]]:
+        """Get the container volumes for the task manager.
+
+        Returns:
+            A list of tuples: name, host path, container path.
+        """
+        return [
+            ("hf-cache", constants.VOLUME_HF_CACHE, "/root/.cache/huggingface"),
+        ]
 
 
 class EncoderLaunchInfo(TaskExecutorLaunchInfo):
@@ -50,6 +64,17 @@ class EncoderLaunchInfo(TaskExecutorLaunchInfo):
     def __init__(self, task_manager_config: EncoderConfig) -> None:
         """Initialize the encoder launch information."""
         self.task_manager_config = task_manager_config
+
+    def get_executor_name(self) -> str:
+        """Get the executor name for the encoder task manager."""
+        name = "-".join(
+            [
+                self.task_manager_config.type,
+                *[x for x in self.task_manager_config.modalities],
+                self.task_manager_config.model_id.split("/")[-1],
+            ]
+        ).lower()
+        return name
 
     def get_container_image(self) -> str:
         """Get the container image for the encoder task manager."""
@@ -75,6 +100,10 @@ class LLMLaunchInfo(TaskExecutorLaunchInfo):
         """Initialize the LLM launch information."""
         self.task_manager_config = task_manager_config
 
+    def get_executor_name(self) -> str:
+        """Get the executor name for the LLM task manager."""
+        return "-".join(["llm", self.task_manager_config.model_id.split("/")[-1]]).lower()
+
     def get_container_image(self) -> str:
         """Get the container image for the LLM task manager."""
         return constants.CONTAINER_IMAGE_VLLM
@@ -88,6 +117,7 @@ class LLMLaunchInfo(TaskExecutorLaunchInfo):
             "--port", str(port),
             "--limit-mm-per-prompt", "image=5",  # TODO: Make this configurable.
             "--cornserve-sidecar-ranks", *[str(gpu.global_rank) for gpu in gpus],
+            "--enforce-eager",
         ]
         # fmt: on
         return cmd

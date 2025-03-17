@@ -16,8 +16,8 @@ from cornserve.services.pb.resource_manager_pb2 import (
 )
 from cornserve.services.pb.resource_manager_pb2_grpc import ResourceManagerStub
 from cornserve.services.pb.common_pb2 import TaskType
-from cornserve.services.gateway.app.task_impl import patch_task_invoke
-from cornserve.services.gateway.app.models import AppClasses, AppDefinition, AppState
+from cornserve.services.gateway.app.task_impl import patch_task_invoke, app_context
+from cornserve.services.gateway.app.models import AppClasses, AppDefinition, AppState, AppContext
 from cornserve.frontend.tasks import Task, LLMTask
 from cornserve.frontend.app import AppRequest, AppResponse, AppConfig
 from cornserve.logging import get_logger
@@ -237,6 +237,10 @@ class AppManager:
 
         # Invoke the app
         try:
+            # Set app context
+            app_context.set(AppContext(app_id=app_id))
+
+            # Create a task to run the app
             app_driver = asyncio.create_task(app_def.classes.serve_fn(request))
 
             async with self.app_lock:
@@ -266,6 +270,15 @@ class AppManager:
         except Exception as e:
             logger.exception("Error invoking app %s: %s", app_id, e)
             raise ValueError(f"Error invoking app {app_id}: {e}") from e
+
+    async def list_apps(self) -> dict[str, AppState]:
+        """List all registered applications and their states.
+
+        Returns:
+            dict[str, AppState]: Mapping of app IDs to their states
+        """
+        async with self.app_lock:
+            return dict(self.app_states)
 
     async def shutdown(self) -> None:
         """Shut down the server."""
