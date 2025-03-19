@@ -181,6 +181,6 @@ cython_debug/
 *pb2_grpc.py
 
 # Workspace
-old
-tmp
-dev
+/old
+/tmp
+/dev
