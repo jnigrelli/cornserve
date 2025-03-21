@@ -131,7 +131,7 @@ class AppManager:
             # Generate a unique app ID
             while True:
                 app_id = f"app-{uuid.uuid4()}"
-                if app_id not in self.apps:
+                if app_id not in self.app_states:
                     break
 
             self.app_states[app_id] = AppState.NOT_READY
