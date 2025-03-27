@@ -1,34 +1,38 @@
 """Worker processes use the GPUs to run tensor parallel inference."""
 
-import signal
-import pickle
 import multiprocessing as mp
+import pickle
+import signal
 from dataclasses import dataclass
 from multiprocessing.process import BaseProcess
 
-import zmq
-import torch
 import psutil
+import torch
+import zmq
+from opentelemetry import context as context_api
+from opentelemetry import propagate, trace
 
+from cornserve.logging import get_logger
+from cornserve.services.sidecar.api import TensorSidecarSender
+from cornserve.task_executors.eric.distributed.parallel import (
+    destroy_distributed,
+    init_distributed,
+)
 from cornserve.task_executors.eric.distributed.shm_broadcast import (
-    MessageQueueHandle,
     MessageQueue,
+    MessageQueueHandle,
 )
 from cornserve.task_executors.eric.executor.loader import load_model
-from cornserve.task_executors.eric.schema import Batch
+from cornserve.task_executors.eric.schema import WorkerBatch
 from cornserve.task_executors.eric.utils.zmq import (
     get_open_zmq_ipc_path,
     zmq_sync_socket,
 )
-from cornserve.task_executors.eric.distributed.parallel import (
-    init_distributed,
-    destroy_distributed,
-)
-
-from cornserve.services.sidecar.api import TensorSidecarSender
-from cornserve.logging import get_logger
+from cornserve.tracing import configure_otel
 
 logger = get_logger(__name__)
+tracer = trace.get_tracer(__name__)
+propagator = propagate.get_global_textmap()
 
 
 @dataclass
@@ -160,6 +164,8 @@ class Worker:
         # Users send SIGNIT, the executor sends SIGTERM.
         shutdown_requested = False
 
+        configure_otel(f"worker[{tp_rank}]")
+
         def shutdown(*_) -> None:
             """Idempotently shutdown the worker process."""
             nonlocal shutdown_requested
@@ -255,9 +261,24 @@ class Worker:
                 raise
 
     @torch.inference_mode()
-    def execute_model(self, batch: Batch) -> None:
+    def execute_model(self, batch: WorkerBatch) -> None:
         """Run the model on a batch of data."""
+        unique_spans = {}
+        for request_id, carrier in zip(batch.request_ids, batch.otel_carriers, strict=True):
+            if carrier and request_id not in unique_spans:
+                context = propagator.extract(carrier)
+                worker_span = tracer.start_span("Worker.execute_model", context=context)
+                worker_span.set_attribute(
+                    "worker.execute_model.batch_size",
+                    len(batch),
+                )
+                worker_span.add_event("model_foward.start")
+                unique_spans[request_id] = worker_span
+
         output = self.model(modality=batch.modality, batch=batch.data)
+        for worker_span in unique_spans.values():
+            worker_span.add_event("model_forward.done")
+
         logger.info(
             "Worker %d processed batch with request IDs %s and returned a tensor of shape %s",
             self.tp_rank,
@@ -267,16 +288,23 @@ class Worker:
 
         # Send to sidecar
         if self.sender_sidecar_client is not None:
-            for i in range(len(batch.data_ids)):
+            for i, request_id in enumerate(batch.request_ids):
                 if (dst_sidecar_ranks := batch.receiver_ranks[i]) is None:
                     continue
+                token = None
+                if request_id in unique_spans:
+                    context = trace.set_span_in_context(unique_spans[request_id])
+                    token = context_api.attach(context)
                 self.sender_sidecar_client.send(
                     chunk=output[i],
-                    id=batch.request_ids[i] + batch.data_ids[i],
+                    id=request_id + batch.data_ids[i],
                     chunk_id=batch.chunk_ids[i],
                     num_chunks=batch.num_chunks[i],
                     dst_sidecar_ranks=dst_sidecar_ranks,
                 )
+                if token:
+                    context_api.detach(token)
+                    unique_spans[request_id].end()
 
         # Dump tensors for debugging if requested
         if batch._dump_prefix is not None and self.tp_rank == 0:

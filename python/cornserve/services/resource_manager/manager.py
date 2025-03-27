@@ -3,29 +3,31 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Coroutine
 from collections import defaultdict
 from contextlib import suppress
 from dataclasses import dataclass
+from typing import Coroutine
 
 import grpc
-import kubernetes_asyncio.config as kconfig
 import kubernetes_asyncio.client as kclient
+import kubernetes_asyncio.config as kconfig
+from opentelemetry import trace
 
 from cornserve import constants
-from cornserve.logging import get_logger
 from cornserve.frontend.tasks import Task
-from cornserve.services.task_manager.models import TaskManagerConfig
-from cornserve.services.resource_manager.resource import GPU, Resource
+from cornserve.logging import get_logger
 from cornserve.services.pb import (
-    task_manager_pb2,
-    task_manager_pb2_grpc,
+    common_pb2,
     task_dispatcher_pb2,
     task_dispatcher_pb2_grpc,
-    common_pb2,
+    task_manager_pb2,
+    task_manager_pb2_grpc,
 )
+from cornserve.services.resource_manager.resource import GPU, Resource
+from cornserve.services.task_manager.models import TaskManagerConfig
 
 logger = get_logger(__name__)
+tracer = trace.get_tracer(__name__)
 
 
 @dataclass
@@ -169,9 +171,12 @@ class ResourceManager:
 
         return ResourceManager(api_client=api_client, resource=resource)
 
+    @tracer.start_as_current_span("ResourceManager.reconcile_new_app")
     async def reconcile_new_app(self, app_id: str, tasks: list[Task]) -> None:
         """Reconcile new app by spawning task managers if needed."""
         logger.info("Reconcile new app %s with tasks %s", app_id, tasks)
+        span = trace.get_current_span()
+        span.set_attribute("resource_manager.reconcile_new_app.app_id", app_id)
 
         # Construct app deployment for the app
         # Fields of TaskManagerDeployments (id and url) will be populated by either
@@ -213,6 +218,10 @@ class ResourceManager:
                     else:
                         task_manager_deployments_to_spawn.append(task_manager_deployment)
                         coros.append(self._spawn_task_manager(task_manager_deployment.config))
+            span.set_attribute(
+                "resource_manager.reconcile_new_app.task_manager_deployments_to_spawn",
+                len(task_manager_deployments_to_spawn),
+            )
             logger.info("Spawning task managers: %s", task_manager_deployments_to_spawn)
             spawn_results = await asyncio.gather(*coros, return_exceptions=True)
 
@@ -401,6 +410,7 @@ class ResourceManager:
             close_coros.append(channel.close(grace=1.0))
         await asyncio.gather(*close_coros)
 
+    @tracer.start_as_current_span("ResourceManager._spawn_task_manager")
     async def _spawn_task_manager(self, task_manager_config: TaskManagerConfig) -> tuple[str, str]:
         """Spawn a new task manager.
 
@@ -408,6 +418,7 @@ class ResourceManager:
         side effects are cleaned up and an exception is raised.
         """
         logger.info("Spawning task manager for %s", task_manager_config)
+        span = trace.get_current_span()
 
         # Sanity check task manager type
         if task_manager_config.type.upper() not in task_manager_pb2.TaskManagerType.keys():  # noqa: SIM118
@@ -418,11 +429,13 @@ class ResourceManager:
             task_manager_id = task_manager_config.create_id()
             if task_manager_id not in self.task_manager_stubs:
                 break
+        span.set_attribute("resource_manager._spawn_task_manager.task_manager_id", task_manager_id)
 
         try:
             # Allocate resource starter pack for the task manager
-            resource = self.resource.allocate(num_gpus=4, owner=task_manager_id)
+            resource = self.resource.allocate(num_gpus=2, owner=task_manager_id)
             self.task_manager_resources[task_manager_id] = resource
+            span.set_attribute("resource_manager._spawn_task_manager.gpus_allocated", len(resource))
 
             # Create a new task manager pod and service
             pod_name = f"task-manager-{task_manager_id}".lower()
@@ -467,14 +480,18 @@ class ResourceManager:
                     ports=[kclient.V1ServicePort(port=port, target_port="grpc")],
                 ),
             )
+            span.add_event("create_pod.start")
             await self.kube_core_client.create_namespaced_pod(
                 namespace=constants.K8S_NAMESPACE,
                 body=pod,
             )  # type: ignore
+            span.add_event("create_pod.done")
+            span.add_event("create_service.start")
             await self.kube_core_client.create_namespaced_service(
                 namespace=constants.K8S_NAMESPACE,
                 body=service,
             )  # type: ignore
+            span.add_event("create_service.done")
             logger.info("Created task manager pod %s and service %s", pod_name, service_name)
 
             # Connect to the task manager gRPC server to initialize it
@@ -485,6 +502,7 @@ class ResourceManager:
 
             # Initialize the task manager by providing it with the task it will manage
             # and an initial set of GPU resources to work with.
+            span.add_event("register_task.start")
             register_task_req = task_manager_pb2.RegisterTaskRequest(
                 task_manager_id=task_manager_id,
                 type=getattr(task_manager_pb2.TaskManagerType, task_manager_config.type.upper()),
@@ -504,6 +522,7 @@ class ResourceManager:
             )
             if response.status != common_pb2.Status.STATUS_OK:
                 raise RuntimeError(f"Failed to register task manager: {response}")
+            span.add_event("register_task.done")
 
         except Exception as e:
             logger.exception("Failed to spawn task manager: %s", e)

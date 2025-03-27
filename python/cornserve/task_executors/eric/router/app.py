@@ -1,17 +1,18 @@
 """Eric FastAPI app definition."""
 
-from fastapi import FastAPI, APIRouter, Request, Response, status
+from fastapi import APIRouter, FastAPI, Request, Response, status
+from opentelemetry import trace
 
 from cornserve.logging import get_logger
 from cornserve.task_executors.eric.config import EricConfig
 from cornserve.task_executors.eric.engine.client import EngineClient
-from cornserve.task_executors.eric.router.processor import Processor
 from cornserve.task_executors.eric.models.registry import MODEL_REGISTRY
-from cornserve.task_executors.eric.schema import EmbeddingRequest, Status, Modality
-
+from cornserve.task_executors.eric.router.processor import Processor
+from cornserve.task_executors.eric.schema import EmbeddingRequest, Modality, Status
 
 router = APIRouter()
 logger = get_logger(__name__)
+tracer = trace.get_tracer(__name__)
 
 
 @router.get("/health")
@@ -41,6 +42,13 @@ async def modalities(raw_request: Request) -> list[Modality]:
 @router.post("/embeddings")
 async def embeddings(request: EmbeddingRequest, raw_request: Request) -> Response:
     """Handler for embedding requests."""
+    span = trace.get_current_span()
+    span.set_attribute("eric.embeddings.req_id", request.id)
+    for data_item in request.data:
+        span.set_attribute(
+            f"eric.embeddings.data.{data_item.id}.url",
+            data_item.url,
+        )
     processor: Processor = raw_request.app.state.processor
     engine_client: EngineClient = raw_request.app.state.engine_client
 

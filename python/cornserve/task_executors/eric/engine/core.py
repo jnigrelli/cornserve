@@ -1,29 +1,37 @@
 """Eric engine core."""
 
+import multiprocessing as mp
 import queue
 import signal
 import threading
-import multiprocessing as mp
-from typing import Any
-from multiprocessing.process import BaseProcess
 from multiprocessing.connection import Connection
+from multiprocessing.process import BaseProcess
+from typing import Any
 
 import psutil
 import zmq
+from opentelemetry import trace
+from opentelemetry.instrumentation.threading import ThreadingInstrumentor
 
-from cornserve.task_executors.eric.config import EricConfig
-from cornserve.task_executors.eric.utils.zmq import zmq_sync_socket
-from cornserve.task_executors.eric.utils.serde import MsgpackEncoder, MsgpackDecoder
-from cornserve.task_executors.eric.executor.executor import ModelExecutor
-from cornserve.task_executors.eric.engine.scheduler import Scheduler
-from cornserve.task_executors.eric.schema import (
-    EngineOpcode,
-    EngineEnqueueRequest,
-    EngineResponse,
-)
 from cornserve.logging import get_logger
+from cornserve.task_executors.eric.config import EricConfig
+from cornserve.task_executors.eric.engine.scheduler import Scheduler
+from cornserve.task_executors.eric.executor.executor import ModelExecutor
+from cornserve.task_executors.eric.schema import (
+    EngineEnqueueMessage,
+    EngineEnqueueRequest,
+    EngineOpcode,
+    EngineResponse,
+    WorkerBatch,
+)
+from cornserve.task_executors.eric.utils.serde import MsgpackDecoder, MsgpackEncoder
+from cornserve.task_executors.eric.utils.zmq import zmq_sync_socket
+from cornserve.tracing import configure_otel
 
 logger = get_logger(__name__)
+tracer = trace.get_tracer(__name__)
+
+ThreadingInstrumentor().instrument()
 
 
 class Engine:
@@ -125,6 +133,8 @@ class Engine:
         # Users send SIGINT, the engine client sends SIGTERM.
         shutdown_requested = False
 
+        configure_otel(f"eric{str(config.sidecar.ranks).replace(' ', '')}")
+
         def shutdown(*_) -> None:
             """Idempotently shutdown the engine process."""
             nonlocal shutdown_requested
@@ -204,11 +214,15 @@ class Engine:
         responses. It handles scheduling, executing, and processing results.
         """
         batch = self.scheduler.schedule()
-        batch_result = self.executor.execute_model(batch)
+        batch_result = self.executor.execute_model(WorkerBatch.from_scheduler_batch(batch))
         done_request_ids = self.scheduler.process_batch_result(
             batch_result.request_ids,
             batch_result.data_ids,
         )
+
+        for req_id, span in zip(batch.request_ids, batch.otel_spans, strict=True):
+            if req_id in done_request_ids and span is not None:
+                span.end()
 
         return EngineResponse(
             request_ids=done_request_ids,
@@ -228,7 +242,7 @@ class Engine:
 
     def _request_receive_loop(self, sock_path: str) -> None:
         """Continuously receive requests from a ZMQ socket and enqueue them."""
-        enqueue_req_decoder = MsgpackDecoder(ty=EngineEnqueueRequest)
+        enqueue_msg_decoder = MsgpackDecoder(ty=EngineEnqueueMessage)
         generic_decoder = MsgpackDecoder()
 
         with zmq_sync_socket(sock_path, zmq.PULL) as sock:
@@ -237,7 +251,8 @@ class Engine:
                 opcode = EngineOpcode(bytes(opcode_frame.buffer))
 
                 if opcode == EngineOpcode.ENQUEUE:
-                    request = enqueue_req_decoder.decode(inst_frame.buffer)
+                    enqueue_msg = enqueue_msg_decoder.decode(inst_frame.buffer)
+                    request = EngineEnqueueRequest.from_msgpack(enqueue_msg)
                 else:
                     request = generic_decoder.decode(inst_frame.buffer)
 

@@ -1,28 +1,33 @@
 """The App Manager registers, invokes, and unregisters applications."""
 
-import uuid
 import asyncio
 import importlib.util
+import uuid
 from collections import defaultdict
 from types import ModuleType
 from typing import Any, get_type_hints
 
 import grpc
+from opentelemetry import trace
+from opentelemetry.instrumentation.grpc import GrpcAioInstrumentorClient
+from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 
+from cornserve.frontend.app import AppConfig, AppRequest, AppResponse
+from cornserve.frontend.tasks import LLMTask, Task
+from cornserve.logging import get_logger
+from cornserve.services.gateway.app.models import AppClasses, AppContext, AppDefinition, AppState
+from cornserve.services.gateway.app.task_impl import app_context, patch_task_invoke
+from cornserve.services.pb.common_pb2 import TaskType
 from cornserve.services.pb.resource_manager_pb2 import (
     ReconcileNewAppRequest,
     ReconcileRemovedAppRequest,
     TaskConfig,
 )
 from cornserve.services.pb.resource_manager_pb2_grpc import ResourceManagerStub
-from cornserve.services.pb.common_pb2 import TaskType
-from cornserve.services.gateway.app.task_impl import patch_task_invoke, app_context
-from cornserve.services.gateway.app.models import AppClasses, AppDefinition, AppState, AppContext
-from cornserve.frontend.tasks import Task, LLMTask
-from cornserve.frontend.app import AppRequest, AppResponse, AppConfig
-from cornserve.logging import get_logger
 
 logger = get_logger(__name__)
+tracer = trace.get_tracer(__name__)
+HTTPXClientInstrumentor().instrument()
 
 
 def load_module_from_source(source_code: str, module_name: str) -> ModuleType:
@@ -111,10 +116,14 @@ class AppManager:
         self.app_states: dict[str, AppState] = {}
         self.app_driver_tasks: dict[str, list[asyncio.Task]] = defaultdict(list)
 
+        # otel gRPC instrumentation
+        GrpcAioInstrumentorClient().instrument()
+
         # gRPC client for resource manager
         self.resource_manager_channel = grpc.aio.insecure_channel(resource_manager_grpc_url)
         self.resource_manager = ResourceManagerStub(self.resource_manager_channel)
 
+    @tracer.start_as_current_span(name="AppManager.register_app")
     async def register_app(self, source_code: str) -> str:
         """Register a new application with the given ID and source code.
 
@@ -127,6 +136,7 @@ class AppManager:
         Raises:
             ValueError: If app validation fails
         """
+        span = trace.get_current_span()
         async with self.app_lock:
             # Generate a unique app ID
             while True:
@@ -135,6 +145,7 @@ class AppManager:
                     break
 
             self.app_states[app_id] = AppState.NOT_READY
+        span.set_attribute("app_manager.register_app.app_id", app_id)
 
         # Load and validate the app
         try:
@@ -226,6 +237,7 @@ class AppManager:
             ValueError: On app invocation failure
             ValidationError: If request data is invalid
         """
+        span = trace.get_current_span()
         async with self.app_lock:
             if self.app_states[app_id] != AppState.READY:
                 raise ValueError(f"App '{app_id}' is not ready")
@@ -243,12 +255,14 @@ class AppManager:
             app_context.set(AppContext(app_id=app_id))
 
             # Create a task to run the app
+            span.add_event("app_driver.start")
             app_driver = asyncio.create_task(app_def.classes.serve_fn(request))
 
             async with self.app_lock:
                 self.app_driver_tasks[app_id].append(app_driver)
 
             response = await app_driver
+            span.add_event("app_driver.done")
 
             # Validate response
             if not isinstance(response, app_def.classes.response_cls):

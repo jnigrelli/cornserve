@@ -1,35 +1,37 @@
 """Defines the Processor class for handling modality preprocessing."""
 
-import time
 import asyncio
 import base64
-import requests
 import importlib
 import threading
-from io import BytesIO
+import time
 from abc import ABC, abstractmethod
-from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor
+from io import BytesIO
+from urllib.parse import urlparse
 
 import decord
 import numpy as np
 import numpy.typing as npt
+import requests
+from opentelemetry import trace
 from PIL import Image
 from transformers import AutoConfig
 
+from cornserve.logging import get_logger
 from cornserve.task_executors.eric.config import (
     ModalityConfig,
 )
+from cornserve.task_executors.eric.models.base import BaseModalityProcessor
+from cornserve.task_executors.eric.models.registry import MODEL_REGISTRY
 from cornserve.task_executors.eric.schema import (
     EmbeddingData,
     Modality,
     ProcessedEmbeddingData,
 )
-from cornserve.task_executors.eric.models.registry import MODEL_REGISTRY
-from cornserve.task_executors.eric.models.base import BaseModalityProcessor
-from cornserve.logging import get_logger
 
 logger = get_logger(__name__)
+tracer = trace.get_tracer(__name__)
 thread_local = threading.local()
 
 
@@ -74,6 +76,7 @@ class Processor:
         """Shutdown the processor and the thread pool."""
         self.pool.shutdown(wait=True, cancel_futures=True)
 
+    @tracer.start_as_current_span(name="Processor.process")
     async def process(self, data: list[EmbeddingData]) -> list[ProcessedEmbeddingData]:
         """Performs modality processing on input data in a thread pool."""
         # Here, we intentionally do not batch images in the processor because
@@ -87,14 +90,23 @@ class Processor:
             for item, feature in zip(data, features, strict=True)
         ]
         self._check_processed_data(processed)
+        span = trace.get_current_span()
+        for data_item in processed:
+            for k, v in data_item.data.items():
+                span.set_attribute(
+                    f"processor.processed_data.{data_item.id}.{k}.shape",
+                    v.shape,
+                )
         return processed
 
+    @tracer.start_as_current_span(name="Processor._do_process")
     def _do_process(self, modality: Modality, url: str) -> dict[str, npt.NDArray]:
         """Run processing on input data."""
         loader: ModalityDataLoader = thread_local.loader
         processor: BaseModalityProcessor = thread_local.processor
         data = loader.load_from_url(modality, url)
-        return processor.process(modality, data)
+        with tracer.start_as_current_span(name="ModalityProcessor.process"):
+            return processor.process(modality, data)
 
     def _check_processed_data(self, processed: list[ProcessedEmbeddingData]) -> None:
         """Check that all processed data is valid."""
@@ -199,6 +211,7 @@ class ModalityDataLoader:
         self.image_loader = ImageLoader(config)
         self.video_loader = VideoLoader(config)
 
+    @tracer.start_as_current_span(name="ModalityDataLoader.load_from_url")
     def load_from_url(self, modality: Modality, url: str) -> npt.NDArray:
         """Load an image from a web, data, or file URL."""
         match modality:
@@ -210,6 +223,10 @@ class ModalityDataLoader:
                 raise ValueError(f"Unsupported modality: {modality}")
 
         start_time = time.monotonic()
+
+        span = trace.get_current_span()
+        span.set_attribute("data.url", url)
+        span.set_attribute("data.modality", modality.value)
 
         url_spec = urlparse(url)
         if url_spec.scheme.startswith("http"):
@@ -223,7 +240,6 @@ class ModalityDataLoader:
                 time.monotonic() - start_time,
                 modality.value,
             )
-            return data
 
         elif url_spec.scheme == "data":
             data_spec, data = url_spec.path.split(",", 1)
@@ -236,7 +252,6 @@ class ModalityDataLoader:
                 time.monotonic() - start_time,
                 modality.value,
             )
-            return data
 
         elif url_spec.scheme == "file":
             data = loader.load_file(url_spec.path)
@@ -245,7 +260,10 @@ class ModalityDataLoader:
                 time.monotonic() - start_time,
                 modality.value,
             )
-            return data
 
         else:
             raise ValueError("The URL must be either a HTTP, data or file URL.")
+
+        span.set_attribute("data.shape", data.shape)
+
+        return data

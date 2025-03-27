@@ -10,15 +10,18 @@ from __future__ import annotations
 
 import os
 import pickle
-import weakref
 import threading
+import weakref
+from concurrent.futures import ThreadPoolExecutor
 from functools import reduce
 from operator import mul
 from typing import List, Optional, cast
-from concurrent.futures import ThreadPoolExecutor
 
 import grpc
 import torch
+from opentelemetry import trace
+from opentelemetry.instrumentation.grpc import GrpcAioInstrumentorClient, GrpcInstrumentorClient
+from opentelemetry.instrumentation.threading import ThreadingInstrumentor
 
 from cornserve.logging import get_logger
 from cornserve.services.pb import comm_sidecar_pb2, comm_sidecar_pb2_grpc, common_pb2
@@ -33,6 +36,10 @@ from .utils import (
 )
 
 logger = get_logger(__name__)
+tracer = trace.get_tracer(__name__)
+GrpcInstrumentorClient().instrument()
+GrpcAioInstrumentorClient().instrument()
+ThreadingInstrumentor().instrument()
 
 
 class TensorSidecarReceiverBase:
@@ -201,20 +208,26 @@ class TensorSidecarAsyncReceiver(TensorSidecarReceiverBase):
         except Exception:
             pass
 
+    @tracer.start_as_current_span(name="TensorSidecarAsyncReceiver.recv")
     async def recv(self, id: str) -> torch.Tensor:
         """Receive a tensor from the sidecar server.
 
         Args:
             id: the id of expected data, should be the concatenation of request id and data id.
         """
+        span = trace.get_current_span()
+        span.set_attribute("sidecar_receiver_client.recv.id", id)
         recv_req = comm_sidecar_pb2.ReceiveRequest(id=id)
         response = await self.stub.Receive(recv_req)
         assert response.offset >= 0 and response.size >= 0, "Failed to receive data"
         chunk = self.shared_tensor[response.offset : response.offset + response.size]
         return chunk.view(self.tensor_shape)
 
+    @tracer.start_as_current_span(name="TensorSidecarAsyncReceiver.markdone")
     async def mark_done(self, id: str) -> None:
         """Mark a tensor as done in the sidecar server, which will free the shared memory buffer."""
+        span = trace.get_current_span()
+        span.set_attribute("sidecar_receiver_client.mark_done.id", id)
         request = comm_sidecar_pb2.MarkDoneRequest(id=id)
         response = await self.stub.MarkDone(request)
         if response.status == common_pb2.Status.STATUS_OK:
@@ -381,6 +394,8 @@ class TensorSidecarSender(TensorSidecarSenderBase):
     def shutdown(self) -> None:
         """Shutdown the sender client."""
         self.shutdown_event.set()
+        with self.memory_lock:
+            self.memory_freed.notify_all()  # Wake up any waiting threads
         self.worker_pool.shutdown(wait=True, cancel_futures=True)
         try:
             del self.shared_tensor
@@ -424,6 +439,7 @@ class TensorSidecarSender(TensorSidecarSenderBase):
             self.shm_manager.free(buffer)
             self.memory_freed.notify_all()
 
+    @tracer.start_as_current_span(name="TensorSidecarSender.send")
     def send(
         self,
         chunk: torch.Tensor,
@@ -455,6 +471,9 @@ class TensorSidecarSender(TensorSidecarSenderBase):
         size = chunk.numel()
         assert size % self.slot_size == 0, "Chunk size should be a multiple of slot size"
         chunk = chunk.view(-1)
+
+        span = trace.get_current_span()
+        span.set_attribute("sidecar_sender_client.send.id", id)
 
         # shard based on the shard rank and num shards
         num_slots = size // self.slot_size
@@ -489,6 +508,7 @@ class TensorSidecarSender(TensorSidecarSenderBase):
             num_chunks=num_chunks,
         )
 
+    @tracer.start_as_current_span(name="TensorSidecarSender._send_worker")
     def _send_worker(
         self,
         id: str,
@@ -510,9 +530,15 @@ class TensorSidecarSender(TensorSidecarSenderBase):
             chunk_id: the chunk id of the data.
             num_chunks: the total number of chunks the data is split into.
         """
+        span = trace.get_current_span()
+        span.add_event("allocate.start")
         buffer = self._allocate(shard.numel())
+        span.add_event("allocate.done")
         try:
             cuda_event = torch.cuda.Event(interprocess=True)
+            # Threading Instrumentor does not instrument the following context manager out of the box
+            # Therefore we add the event before it, otherwise we need to manually instrument the thread
+            span.add_event("copy.start")
             with torch.cuda.stream(self.stream):
                 buffer.data.copy_(shard, non_blocking=True)
                 cuda_event.record(self.stream)

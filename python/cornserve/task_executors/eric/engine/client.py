@@ -1,31 +1,34 @@
 """The engine client lives in the router process and interacts with the engine process."""
 
-import os
 import asyncio
-from contextlib import suppress
+import os
 from asyncio.futures import Future
+from contextlib import suppress
 
 import zmq
 import zmq.asyncio
+from opentelemetry import propagate, trace
 
+from cornserve.logging import get_logger
 from cornserve.task_executors.eric.config import EricConfig
+from cornserve.task_executors.eric.engine.core import Engine
+from cornserve.task_executors.eric.schema import (
+    EmbeddingResponse,
+    EngineEnqueueMessage,
+    EngineOpcode,
+    EngineResponse,
+    ProcessedEmbeddingData,
+)
+from cornserve.task_executors.eric.utils.process import kill_process_tree
 from cornserve.task_executors.eric.utils.serde import MsgpackDecoder, MsgpackEncoder
 from cornserve.task_executors.eric.utils.zmq import (
     get_open_zmq_ipc_path,
     make_zmq_socket,
 )
-from cornserve.task_executors.eric.utils.process import kill_process_tree
-from cornserve.task_executors.eric.engine.core import Engine
-from cornserve.task_executors.eric.schema import (
-    EmbeddingResponse,
-    EngineOpcode,
-    EngineEnqueueRequest,
-    EngineResponse,
-    ProcessedEmbeddingData,
-)
-from cornserve.logging import get_logger
 
 logger = get_logger(__name__)
+tracer = trace.get_tracer(__name__)
+propagator = propagate.get_global_textmap()
 
 
 class EngineClient:
@@ -118,12 +121,17 @@ class EngineClient:
         fut: Future[EmbeddingResponse] = self.loop.create_future()
         self.responses[request_id] = fut
 
+        carrier = {}
+        propagator.inject(carrier)
+
         # Build and send the request
-        req = EngineEnqueueRequest(
+        req = EngineEnqueueMessage(
             request_id=request_id,
             data=processed,
             receiver_sidecar_ranks=receiver_sidecar_ranks,
+            otel_carrier=carrier,
         )
+
         msg_bytes = self.encoder.encode(req)
         await self.request_sock.send_multipart(
             (EngineOpcode.ENQUEUE.value, msg_bytes),

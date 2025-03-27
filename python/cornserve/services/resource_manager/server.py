@@ -4,11 +4,13 @@ import asyncio
 
 import grpc
 import tyro
+from opentelemetry.instrumentation.grpc import GrpcAioInstrumentorClient, GrpcAioInstrumentorServer
 
 from cornserve.frontend.tasks import Task
 from cornserve.logging import get_logger
-from cornserve.services.pb import resource_manager_pb2, resource_manager_pb2_grpc, common_pb2
+from cornserve.services.pb import common_pb2, resource_manager_pb2, resource_manager_pb2_grpc
 from cornserve.services.resource_manager.manager import ResourceManager
+from cornserve.tracing import configure_otel
 
 logger = get_logger(__name__)
 cleanup_coroutines = []
@@ -77,6 +79,11 @@ class ResourceManagerServicer(resource_manager_pb2_grpc.ResourceManagerServicer)
 
 async def serve(ip: str = "[::]", port: int = 50051) -> None:
     """Start the gRPC server."""
+    configure_otel("resource_manager")
+
+    GrpcAioInstrumentorServer().instrument()
+    GrpcAioInstrumentorClient().instrument()
+
     manager = await ResourceManager.init()
 
     server = grpc.aio.server()

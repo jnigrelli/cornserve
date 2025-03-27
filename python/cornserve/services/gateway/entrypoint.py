@@ -1,13 +1,15 @@
 """Spins up the Gateway service."""
 
-import signal
 import asyncio
+import signal
 from typing import TYPE_CHECKING
 
 import uvicorn
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
-from cornserve.services.gateway.router import create_app
 from cornserve.logging import get_logger
+from cornserve.services.gateway.router import create_app
+from cornserve.tracing import configure_otel
 
 if TYPE_CHECKING:
     from cornserve.services.gateway.app.manager import AppManager
@@ -19,7 +21,10 @@ async def serve() -> None:
     """Serve the Gateway as a FastAPI app."""
     logger.info("Starting Gateway service")
 
+    configure_otel("gateway")
+
     app = create_app()
+    FastAPIInstrumentor.instrument_app(app)
 
     logger.info("Available routes are:")
     for route in app.routes:

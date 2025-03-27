@@ -2,16 +2,18 @@
 
 from typing import Any
 
-from fastapi import FastAPI, APIRouter, Request, Response, status
+from fastapi import APIRouter, FastAPI, Request, Response, status
 from fastapi.exceptions import RequestValidationError
+from opentelemetry import trace
 from pydantic import BaseModel, ValidationError
 
-from cornserve.services.gateway.app.manager import AppManager
 from cornserve.constants import K8S_RESOURCE_MANAGER_GRPC_URL
 from cornserve.logging import get_logger
+from cornserve.services.gateway.app.manager import AppManager
 
 router = APIRouter()
 logger = get_logger(__name__)
+tracer = trace.get_tracer(__name__)
 
 
 class RegisterAppRequest(BaseModel):
@@ -69,6 +71,8 @@ async def register_app(request: RegisterAppRequest, raw_request: Request):
 async def unregister_app(app_id: str, raw_request: Request):
     """Unregister the application with the given ID."""
     app_manager: AppManager = raw_request.app.state.app_manager
+    span = trace.get_current_span()
+    span.set_attribute("gateway.unregister_app.app_id", app_id)
 
     try:
         await app_manager.unregister_app(app_id)
@@ -88,6 +92,10 @@ async def invoke_app(app_id: str, request: AppRequest, raw_request: Request):
     """Invoke a registered application."""
     app_manager: AppManager = raw_request.app.state.app_manager
 
+    span = trace.get_current_span()
+    span.set_attribute("gateway.invoke_app.app_id", app_id)
+    for key, value in request.request_data.items():
+        span.set_attribute(f"gateway.invoke_app.{key}", value)
     try:
         return await app_manager.invoke_app(app_id, request.request_data)
     except ValidationError as e:
