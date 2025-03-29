@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections import defaultdict
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Coroutine
@@ -90,6 +89,107 @@ class AppDeployment:
         return None
 
 
+class SidecarLaunchInfo:
+    """Information to launch sidecars."""
+
+    @staticmethod
+    def get_pod(
+        node: kclient.V1Node,
+        sidecar_rank: int,
+        world_size: int,
+    ) -> kclient.V1Pod:
+        """Get the pod spec for the sidecar.
+
+        Args:
+            node: The Kubernetes node to launch the sidecar on.
+            sidecar_rank: The global rank of the sidecar.
+            world_size: The total number of sidecars in the cluster.
+        """
+        if not node.metadata:
+            raise ValueError("Node metadata is missing")
+        pod_name = f"sidecar-{sidecar_rank}"
+        return kclient.V1Pod(
+            metadata=kclient.V1ObjectMeta(
+                name=pod_name,
+                labels={
+                    "app": "sidecar",
+                    "sidecar-rank": str(sidecar_rank),
+                },
+            ),
+            spec=kclient.V1PodSpec(
+                containers=[
+                    kclient.V1Container(
+                        name="sidecar",
+                        image=constants.CONTAINER_IMAGE_SIDECAR,
+                        image_pull_policy="Always",
+                        ports=[
+                            kclient.V1ContainerPort(
+                                container_port=constants.K8S_SIDECAR_SERVICE_PORT,
+                                name=constants.K8S_SIDECAR_SERVICE_PORT_NAME,
+                            ),
+                        ],
+                        env=[
+                            kclient.V1EnvVar(name=name, value=value)
+                            for name, value in SidecarLaunchInfo.get_envs(
+                                sidecar_rank,
+                                world_size,
+                            )
+                        ],
+                        volume_mounts=[
+                            kclient.V1VolumeMount(
+                                name=name,
+                                mount_path=container_path,
+                            )
+                            for name, _, container_path in SidecarLaunchInfo.get_container_volumes()
+                        ],
+                    )
+                ],
+                volumes=[
+                    kclient.V1Volume(
+                        name=name,
+                        host_path=kclient.V1HostPathVolumeSource(path=host_path),
+                    )
+                    for name, host_path, _ in SidecarLaunchInfo.get_container_volumes()
+                ],
+                service_account_name="sidecar",
+                runtime_class_name="nvidia",
+                node_name=node.metadata.name,
+                host_ipc=True,
+                host_pid=True,
+                hostname=f"sidecar-{sidecar_rank}",
+                subdomain="sidecar",
+            ),
+        )
+
+    @staticmethod
+    def get_envs(sidecar_rank: int, world_size: int) -> list[tuple[str, str]]:
+        """Get the environment variables for the sidecar.
+
+        Args:
+            sidecar_rank: The global rank of the sidecar.
+            world_size: The total number of sidecars in the cluster.
+        """
+        return [
+            (
+                "SIDECAR_MASTER_ADDR",
+                f"{constants.K8S_SIDECAR_SERVICE_NAME}-0.{constants.K8S_SIDECAR_SERVICE_NAME}.{constants.K8S_NAMESPACE}.svc.cluster.local",
+            ),
+            ("SIDECAR_MASTER_PORT", str(constants.K8S_SIDECAR_SERVICE_PORT)),
+            ("SIDECAR_WORLD_SIZE", str(world_size)),
+            ("SIDECAR_POD_NAME", str(f"sidecar-{sidecar_rank}")),
+        ]
+
+    @staticmethod
+    def get_container_image() -> str:
+        """Get the container image for the sidecar."""
+        return constants.CONTAINER_IMAGE_SIDECAR
+
+    @staticmethod
+    def get_container_volumes() -> list[tuple[str, str, str]]:
+        """Get the container volumes for the sidecar."""
+        return [("shm-volume", constants.VOLUME_SHM, "/dev/shm")]
+
+
 class ResourceManager:
     """The Resource Manager allocates resources for Task Managers."""
 
@@ -119,57 +219,61 @@ class ResourceManager:
     async def init() -> ResourceManager:
         """Actually initialize the resource manager.
 
-        First, discover all sidecar pods in the cluster and instantiate one GPU object
-        for each pod. The global rank is parsed from the pod name, and the local rank is
-        determined by the alphabetical order of pod names within each node. Created GPU
-        objects make up the `Resource` object.
-
+        Spawn the sidecar pods and created GPU objects make up the `Resource` object.
         Initialization has to involve asyncio, so we can't do it in the constructor.
         """
         kconfig.load_incluster_config()
         api_client = kclient.ApiClient()
         core_api = kclient.CoreV1Api(api_client)
-        apps_api = kclient.AppsV1Api(api_client)
 
-        # Wait until the sidecars are all ready
-        while True:
-            await asyncio.sleep(1)
-            sidecar_set = await apps_api.read_namespaced_stateful_set(  # type: ignore
-                name=constants.K8S_SIDECAR_STATEFULSET_NAME,
-                namespace=constants.K8S_NAMESPACE,
-            )
-            num_ready = sidecar_set.status.ready_replicas or 0  # type: ignore
-            num_expected = sidecar_set.spec.replicas  # type: ignore
-            if num_ready == num_expected:
-                break
-            logger.info("Waiting for all sidecar pods to be ready... %d/%d", num_ready, num_expected)
-        logger.info("All %d sidecar pods are ready.", sidecar_set.status.ready_replicas)  # type: ignore
-
-        # Discover the sidecar pods
-        label_selector = ",".join(
-            f"{key}={value}"
-            for key, value in sidecar_set.spec.selector.match_labels.items()  # type: ignore
-        )
-        sidecar_pod_list = await core_api.list_namespaced_pod(
-            namespace=constants.K8S_NAMESPACE,
-            label_selector=label_selector,
-        )
-        sidecar_pods = sidecar_pod_list.items
-
-        # Construct GPUs and cluster resource object
-        node_to_pods: dict[str, list[kclient.V1Pod]] = defaultdict(list)
-        for pod in sidecar_pods:
-            node = pod.spec.node_name
-            node_to_pods[node].append(pod)
+        # first find the all the nodes in the cluster
+        nodes = await core_api.list_node()
+        # then for each node, we create num_gpu_per_node sidecars with rank
+        coros = []
         gpus = []
-        for node, pods in node_to_pods.items():
-            for local_rank, pod in enumerate(sorted(pods, key=lambda p: p.metadata.name)):  # type: ignore
-                global_rank = int(pod.metadata.name.split("-")[-1])  # type: ignore
-                gpu = GPU(node=node, global_rank=global_rank, local_rank=local_rank)
-                gpus.append(gpu)
-        resource = Resource(gpus=gpus)
+        created_pods = []
+        try:
+            gpu_per_node = {}
+            # first query the number of GPUs on each node
+            for node in nodes.items:
+                gpu_per_node[node.metadata.name] = int(node.status.capacity["nvidia.com/gpu"])
+            world_size = sum(gpu_per_node.values())
+            sidecar_rank = 0
+            for node in nodes.items:
+                for j in range(gpu_per_node[node.metadata.name]):
+                    pod = SidecarLaunchInfo.get_pod(node, sidecar_rank, world_size)
+                    coros.append(core_api.create_namespaced_pod(namespace=constants.K8S_NAMESPACE, body=pod))
+                    gpus.append(GPU(node=node.metadata.name, global_rank=sidecar_rank, local_rank=j))
+                    sidecar_rank += 1
 
-        return ResourceManager(api_client=api_client, resource=resource)
+            spawn_results = await asyncio.gather(*coros, return_exceptions=True)
+            failed = 0
+            for i, result in enumerate(spawn_results):
+                if isinstance(result, BaseException):
+                    logger.error("Failed to spawn sidecar pod for GPU %s: %s", gpus[i], result)
+                    failed += 1
+                else:
+                    created_pods.append(result)
+                    logger.info("Successfully spawned sidecar pod for GPU %s", gpus[i])
+            if failed:
+                # Clean up any created pods
+                cleanup_coros = []
+                with suppress(kclient.ApiException):
+                    for pod in created_pods:
+                        cleanup_coros.append(
+                            core_api.delete_namespaced_pod(
+                                name=pod.metadata.name,
+                                namespace=constants.K8S_NAMESPACE,
+                            )
+                        )
+                    await asyncio.gather(*cleanup_coros, return_exceptions=True)
+                raise RuntimeError(f"Failed to spawn {failed} sidecar pods")
+
+            resource = Resource(gpus=gpus)
+            return ResourceManager(api_client=api_client, resource=resource)
+        except Exception as e:
+            logger.error("Error during resource initialization: %s", str(e))
+            raise
 
     @tracer.start_as_current_span("ResourceManager.reconcile_new_app")
     async def reconcile_new_app(self, app_id: str, tasks: list[Task]) -> None:
@@ -401,14 +505,28 @@ class ResourceManager:
 
         return all_healthy, task_manager_statuses
 
+    async def _kill_sidecars(self) -> list[Coroutine[None, None, None]]:
+        """Kill all sidecars."""
+        coros = []
+        for pod in await self.kube_core_client.list_namespaced_pod(namespace=constants.K8S_NAMESPACE):
+            if pod.metadata.labels.get("app") == "sidecar":
+                coros.append(
+                    self.kube_core_client.delete_namespaced_pod(
+                        name=pod.metadata.name,
+                        namespace=constants.K8S_NAMESPACE,
+                    )
+                )
+        return coros
+
     async def shutdown(self) -> None:
         """Shutdown the ResourceManager."""
         await self.api_client.close()
         await self.task_dispatcher_channel.close()
-        close_coros = []
+        coros = []
         for channel in self.task_manager_channels.values():
-            close_coros.append(channel.close(grace=1.0))
-        await asyncio.gather(*close_coros)
+            coros.append(channel.close(grace=1.0))
+        coros.extend(await self._kill_sidecars())
+        await asyncio.gather(*coros)
 
     @tracer.start_as_current_span("ResourceManager._spawn_task_manager")
     async def _spawn_task_manager(self, task_manager_config: TaskManagerConfig) -> tuple[str, str]:
