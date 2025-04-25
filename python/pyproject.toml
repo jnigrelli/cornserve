@@ -17,15 +17,17 @@ dependencies = [
     "tyro",
     "kubernetes_asyncio",
     "httpx",
-    "pydantic",
+    "pydantic>=2.11",
     "opentelemetry-api",
     "opentelemetry-sdk",
     "opentelemetry-exporter-otlp-proto-grpc",
 ]
 dynamic = ["version"]
 
+[project.scripts]
+cornserve = "cornserve.cli:main"
+
 [project.optional-dependencies]
-frontend = []
 sidecar = [
   "torch",
   "opentelemetry-instrumentation-grpc",
@@ -59,21 +61,20 @@ eric-no-gpu = [
   "transformers",
   "huggingface_hub",
   "pillow",
-  "decord",
+  "opencv-python-headless",
   "einops",
-  "xformers",
   "cornserve[sidecar]",
   "opentelemetry-instrumentation-fastapi",
   "opentelemetry-instrumentation-threading",
 ]
-eric = ["flash-attn", "cornserve[eric-no-gpu]"]
+eric = ["flash-attn", "xformers", "cornserve[eric-no-gpu]"]
 dev-common = [
   "grpcio-tools",
   "pyright",
   "ruff",
   "pytest",
   "pytest-asyncio",
-  "cornserve[dev-common,frontend,sidecar,gateway,resource-manager,task-manager,task-dispatcher]",
+  "cornserve[dev-common,sidecar,gateway,resource-manager,task-manager,task-dispatcher]",
 ]
 dev = ["cornserve[dev-common,eric]"]
 dev-no-gpu = ["cornserve[dev-common,eric-no-gpu]"]
@@ -92,6 +93,7 @@ select = [
   "D",   # pydocstyle
   "PL",  # pylint
   "N",   # pep8-naming
+  # "UP",  # pyupgrade
   "B",   # flake8-bugbear (detects likely bugs)
   "G",   # flake8-logging-format (complains about logging)
   "SIM", # flake8-simplify (suggests code simplifications)
