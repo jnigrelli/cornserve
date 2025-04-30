@@ -10,7 +10,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any, ClassVar, Generator, Generic, Self, TypeVar, final
+from typing import TYPE_CHECKING, Any, ClassVar, Generator, Generic, Iterable, Self, TypeVar, final
 
 import httpx
 from opentelemetry import trace
@@ -141,6 +141,25 @@ class Task(BaseModel, ABC, Generic[InputT, OutputT]):
         # The `replay` context manager will have all tasks directly use actual task outputs.
         with ctx.replay():
             return self.invoke(task_input)
+
+
+def discover_unit_tasks(tasks: Iterable[Task]) -> list[UnitTask]:
+    """Discover unit tasks from an iterable of tasks.
+
+    A task may itself be a unit task, or a composite task that contains unit tasks
+    as subtasks inside it.
+
+    Args:
+        tasks: An iterable over task objects
+    """
+    unit_tasks: list[UnitTask] = []
+    for task in tasks:
+        if isinstance(task, UnitTask):
+            unit_tasks.append(task)
+        else:
+            unit_tasks.extend(discover_unit_tasks(getattr(task, attr) for attr in task.subtask_attr_names))
+
+    return unit_tasks
 
 
 class UnitTask(Task, Generic[InputT, OutputT]):
@@ -547,3 +566,39 @@ class TaskContext:
         # This should be the right type because it's just being deserialized from the
         # task's actual output.
         return task_output  # type: ignore
+
+
+class UnitTaskList(BaseModel):
+    """A wrapper class for a list of unit tasks.
+
+    This class is added to avoid self-recursion on serialization the `UnitTask` class.
+    """
+
+    tasks: list[UnitTask]
+
+    @model_serializer()
+    def _serialize(self):
+        """Serialize the unittask list."""
+        return {
+            "_task_list": [
+                {
+                    "class_name": task.__class__.__name__,
+                    "task": task.model_dump_json(),
+                }
+                for task in self.tasks
+            ],
+        }
+
+    @model_validator(mode="before")
+    @classmethod
+    def _deserialize(cls, data: dict[str, Any]):
+        """Deserialize the unittask list."""
+        if "_task_list" not in data:
+            return data
+        tasks = []
+        for item in data["_task_list"]:
+            task_data = item["task"]
+            task_class, _, _ = TASK_REGISTRY.get(item["class_name"])
+            task = task_class.model_validate_json(task_data)
+            tasks.append(task)
+        return {"tasks": tasks}
