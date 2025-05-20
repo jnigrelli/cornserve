@@ -10,14 +10,20 @@ from cornserve import constants
 class SidecarLaunchInfo:
     """Information to launch sidecars."""
 
-    @classmethod
-    def get_pod(cls, node: kclient.V1Node, sidecar_rank: int, world_size: int) -> kclient.V1Pod:
+    @staticmethod
+    def get_pod(
+        node: kclient.V1Node,
+        sidecar_rank: int,
+        world_size: int,
+        peer_ranks: list[int],
+    ) -> kclient.V1Pod:
         """Get the pod spec for the sidecar.
 
         Args:
             node: The Kubernetes node to launch the sidecar on.
             sidecar_rank: The global rank of the sidecar.
             world_size: The total number of sidecars in the cluster.
+            peer_ranks: The sidecar ranks of the peers in the same node.
         """
         if not node.metadata:
             raise ValueError("Node metadata is missing")
@@ -36,17 +42,15 @@ class SidecarLaunchInfo:
                         name="sidecar",
                         image=constants.CONTAINER_IMAGE_SIDECAR,
                         image_pull_policy="Always",
-                        ports=[
-                            kclient.V1ContainerPort(
-                                container_port=constants.K8S_SIDECAR_SERVICE_PORT,
-                                name=constants.K8S_SIDECAR_SERVICE_PORT_NAME,
-                            ),
-                        ],
+                        security_context=kclient.V1SecurityContext(
+                            privileged=True,
+                        ),
                         env=[
                             kclient.V1EnvVar(name=name, value=value)
-                            for name, value in cls.get_envs(
+                            for name, value in SidecarLaunchInfo.get_envs(
                                 sidecar_rank,
                                 world_size,
+                                peer_ranks,
                             )
                         ],
                         volume_mounts=[
@@ -54,7 +58,7 @@ class SidecarLaunchInfo:
                                 name=name,
                                 mount_path=container_path,
                             )
-                            for name, _, container_path in cls.get_container_volumes()
+                            for name, _, container_path in SidecarLaunchInfo.get_container_volumes()
                         ],
                     )
                 ],
@@ -63,7 +67,7 @@ class SidecarLaunchInfo:
                         name=name,
                         host_path=kclient.V1HostPathVolumeSource(path=host_path),
                     )
-                    for name, host_path, _ in cls.get_container_volumes()
+                    for name, host_path, _ in SidecarLaunchInfo.get_container_volumes()
                 ],
                 service_account_name="sidecar",
                 runtime_class_name="nvidia",
@@ -76,21 +80,18 @@ class SidecarLaunchInfo:
         )
 
     @staticmethod
-    def get_envs(sidecar_rank: int, world_size: int) -> list[tuple[str, str]]:
+    def get_envs(sidecar_rank: int, world_size: int, peer_ranks: list[int]) -> list[tuple[str, str]]:
         """Get the environment variables for the sidecar.
 
         Args:
             sidecar_rank: The global rank of the sidecar.
             world_size: The total number of sidecars in the cluster.
+            peer_ranks: The sidecar ranks of the peers in the same node.
         """
         return [
-            (
-                "SIDECAR_MASTER_ADDR",
-                f"{constants.K8S_SIDECAR_SERVICE_NAME}-0.{constants.K8S_SIDECAR_SERVICE_NAME}.{constants.K8S_NAMESPACE}.svc.cluster.local",
-            ),
-            ("SIDECAR_MASTER_PORT", str(constants.K8S_SIDECAR_SERVICE_PORT)),
             ("SIDECAR_WORLD_SIZE", str(world_size)),
-            ("SIDECAR_POD_NAME", str(f"sidecar-{sidecar_rank}")),
+            ("SIDECAR_RANK", str(sidecar_rank)),
+            ("SIDECAR_LOCAL_PEER_RANKS", ",".join(map(str, peer_ranks))),
         ]
 
     @staticmethod
@@ -101,4 +102,8 @@ class SidecarLaunchInfo:
     @staticmethod
     def get_container_volumes() -> list[tuple[str, str, str]]:
         """Get the container volumes for the sidecar."""
-        return [("shm-volume", constants.VOLUME_SHM, "/dev/shm")]
+        return [
+            ("shm-volume", constants.VOLUME_SHM, "/dev/shm"),
+            ("infiniband-class", "/sys/class/infiniband", "/sys/class/infiniband"),
+            ("infiniband-dev", "/dev/infiniband", "/dev/infiniband"),
+        ]

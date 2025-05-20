@@ -1,69 +1,80 @@
-# Sidecar
+# Sidecar: P2P Communication Library
 
-_NOTE: Naming is temporary_
-
-Sidecar is a P2P tensor communication library that launches long living processes
-to send/receive tensors to/from each other.
+Sidecar is the P2P communication library in Cornserve that allows task executors
+to send/receive intermediate data to/from each other. It's mainly designed for
+tensor, but it also supports any other types.
 
 Code lives under `python/services/sidecar`
 
-## Motivation
-The distributed processing group in PyTorch is rigid and it's costly to
-dynamically scale the processing group or adjust the role of each distributed
-process. The Cornserve project requires auto-scaling of distributed
-task executors. To support intermediate data (tensor) transfer adaptively, we
-decouple communication from task executors to dedicated `sidecars` that can be
-long-living within the cluster.
-
 ## Architecture
-Sidecars are implemented with Servers and Clients. Conceptually, servers are long
-running, and clients register to servers and request servers to perform send or
-receive operations. All control signals among servers and clients use gRPC, and
-the tensor transfer is implemented using `gloo`. Servers and clients use shared 
-memory buffer to reduce memory copies. A sender client puts some data in the
-shared memory buffer and provide a handle to the sender server, the sender server
-then transmits the data to the receiver server. Upon the receiver client calling
-receive on that data, a shared memory handle used by the receiver server will be
-returned.
+Sidecars have servers and clients. Servers are long running services in the
+cluster, created upon cluster deployment. Clients live within Task Executors,
+and task executors invoke clients for send and receive operations which are then
+fulfilled by the servers.
+
 
 ### Servers
-Servers are the long-running processes within the cluster, and each GPU is
-expected to be paired with at least one server (duplicate servers for
-fault-tolerance, work in the future). The role of a server is unique but also
-dynamic. When a client registers as a sender to a server, the requested server
-becomes a Sender Server, and vice versa.
+Each GPU in the cluster is usually paired with one dedicated Sidecar server, but
+Sidecar servers can also act as a group when, for example, a task executor runs
+a model with tensor parallel.
 
-Classes within `python/services/sidecar/server.py` are servers.
+All Sidecar servers and clients send control signals through gRPC, while Sidecar
+servers use `UCX` as the backend for tensor transfer, which uses RDMA if possible.
+Small objects are directly sent over through gRPC to reduce contention.
 
-#### `CommSidecarSender`
-An intermediate data can be chunked, and each chunk could be further sharded
-when there are multiple senders holding the same chunk. This reduces the
-communication volume when a producer task executor has TP size > 1.
+#### Forwarding Tensors
+The tensor transfer among Sidecar servers do not use NVLink, as they are preserved
+for maximizing throughput when running models with tensor parallel. Throughout a
+tensor forward from a producer with a Sidecar sender server to a consumer with a
+Sidecar receiver server, the Sidecar sender will copy the tensor from the producer's
+GPU to CPU, and the tensor will arrive at the receiver server's CPU. Therefore,
+the consumer has the responsibility for copying the received tensor to its devices.
+If the producer and the consumer locates within the same node, there will be no
+addition transfer over the network.
 
-#### `CommSidecarReceiver`
-The receiver server manages the shared memory buffer. A `recv` call will only
-return when the all chunks of a data has been received (in near future, this 
-will become an async generator that returns chunks in order). When the consumer
-no longer needs the data, a corresponding `mark_done` must be called to free the
-buffer used by that data.
+When multiple Sidecars are grouped, Sidecars assume each producer in the group
+holds a full replica of the tensor to forward, and the Sidecar Servers could
+choose to either use one single GPU or use every GPU in the group when copying
+-- adjusted through a configuration knob.
+
+#### Chunking
+Producers are free to chunk the forwarding tensors in any way. However, it's not
+recommended to have chunks with non-contiguous memory view due overhead.
+Sidecars view each chunk as independent, so there is no guarantee that all the
+chunks will be in order or are placed a slab of contiguous memory. Consumers can
+decide to process chunks in order, or decide to process all chunks together if
+the consumer cannot utilize chunks independently.
+
+
+#### Memory Management
+Sidecar servers manage CPU memory for placing the tensors to send and receive. To
+reduce internal fragmentation, sidecar clients, thus task executors, are currently
+required to provide memory hint for the servers. The memory hint is conceptually
+the memory allocation unit size for the servers, and typically this could be the 
+hidden size of a model the executor is running.
+
 
 ### Clients
 Clients are the front ends for task executors to interact with servers.
 
-Classes within `python/services/sidecar/api.py` are clients.
+Task executors can define a `SidecarConfig` from `python/sidecar/schema.py` and 
+then instantiate a `Sidecar` client from `python/sidecar/api.py`. The client will
+setup the Sidecar server for the task executor's use upon creation. The client
+mainly provides three sets of APIs, namely, `send`, `recv`, and `mark_done`.
 
-#### `TensorSidecarSender`
-All methods are blocking. It has a shared memory manager. The underlying send
-uses a thread pool to be non-blocking.
+#### `send`
+`send` can be used to broadcast some data to a list of Sidecar groups. When chunking
+is involved, the producer need to fill in the `chunk_id` and `num_chunks` parameters.
 
-#### `TensorSidecarAsyncReceiver`
-All methods are asynchronous. It allows for grouping, where a consumer task
-executor may use multiple sidecar receiver servers. In that case, all send
-communication will go through the sidecar server with the lowest rank.
+#### `recv`
+`recv` can be used to receive data at chunk-granularity, where `chunk_id` can be
+specified. The returning data is either a tensor with CPU storage or a small python
+object. Receive operations are idempotent for Sidecars, so multiple consumer processes
+can consume the data concurrently. There is also a synchronous version called `recv_sync`.
 
-#### `TensorSidecarReceiverExecutor`
-All methods are synchronous. This class acts as a reader to the received data.
-The `recv` will return the requested data, but it should be called after the
-`TensorSidecarAsyncReceiver` has confirmed the completion of data transfer.
+#### `mark_done`
+`mark_done` is used to free the backing memory of a received tensor in the Sidecar
+server. As the Sidecar server allows for idempotent receive operations, the data
+is always held within the server until a corresponding `mark_done` called.
 
-
+See `python/sidecar/api.py` for more details.

@@ -1,0 +1,114 @@
+syntax = "proto3";
+
+package cornserve.sidecar;
+
+import "common.proto";
+
+service Sidecar {
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc Send(SendRequest) returns (SendResponse);
+  rpc Receive(ReceiveRequest) returns (ReceiveResponse);
+  rpc MarkDone(MarkDoneRequest) returns (MarkDoneResponse);
+  rpc Unlink(UnlinkRequest) returns (UnlinkResponse);
+  rpc PrepareReceive(PrepareReceiveRequest) returns (PrepareReceiveResponse);
+
+  rpc CheckHealth(CheckHealthRequest) returns (CheckHealthResponse);
+  // TODO: add unregister
+}
+
+message RegisterRequest {
+  int32 rank = 1;
+  repeated int32 group = 2;
+  string dtype = 3;
+  int32 send_slot_numel = 4;
+  int32 recv_slot_numel = 5;
+  bool concurrent_copy = 6;
+}
+
+message RegisterResponse {
+  common.Status status = 1;
+  int64 shm_size = 2; // numel in the single sender/receiver slab
+  int32 local_rank = 3; // the GPU index to use
+  int32 num_local_sidecars = 4; // used for init_shmem
+}
+
+message RankGroup {
+  repeated int32 ranks = 1;
+}
+
+message SendRequest {
+  string id = 1;
+  repeated RankGroup dst_ranks = 2;
+  int32 shard_rank = 3; // tp rank
+  bytes data = 4; // serialized obj
+  int32 chunk_id = 5;
+  int32 num_chunks = 6;
+}
+
+message SendResponse {
+  common.Status status = 1;
+}
+
+message ReceiveRequest {
+  string id = 1;
+  int32 chunk_id = 2;
+}
+
+message ReceiveResponse {
+  common.Status status = 1;
+  bytes data = 2;
+}
+
+message MarkDoneRequest {
+  string id = 1;
+  int32 chunk_id = 2;
+  int32 shard_rank = 3; // tp rank
+}
+
+message MarkDoneResponse {
+  common.Status status = 1;
+}
+
+message UnlinkRequest {
+  string id = 1;
+  int32 chunk_id = 2;
+}
+
+message UnlinkResponse {
+  common.Status status = 1;
+}
+
+
+message PrepareReceiveRequest {
+  string id = 1;
+  bytes data = 2; // msgpack encoded handle
+  int32 src_rank = 3;
+  int32 chunk_id = 4;
+  int32 num_chunks = 5;
+}
+
+message PrepareReceiveResponse {
+  common.Status status = 1;
+}
+
+enum HealthStatus {
+  HEALTH_ALL_GOOD = 0;
+  HEALTH_MEMORY_PRESSURE = 1;
+  // This is for a revived or uninitialized sidecar.
+  HEALTH_OFFLINE = 2;
+}
+
+message CheckHealthRequest {
+}
+
+message CheckHealthResponse {
+  HealthStatus status = 1;
+}
+
+message ReportMemoryRequest {
+  int32 pressure = 1;
+}
+
+message ReportMemoryResponse {
+  common.Status status = 1;
+}

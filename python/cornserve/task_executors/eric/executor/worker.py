@@ -15,7 +15,8 @@ from opentelemetry import context as context_api
 from opentelemetry import propagate, trace
 
 from cornserve.logging import get_logger
-from cornserve.services.sidecar.api import TensorSidecarSender
+from cornserve.sidecar.api import Sidecar
+from cornserve.sidecar.schema import SidecarConfig
 from cornserve.task_executors.eric.distributed.parallel import (
     destroy_distributed,
     init_distributed,
@@ -64,7 +65,7 @@ class Worker:
         tp_size: int,
         input_mq: MessageQueue,
         response_mq: MessageQueue,
-        sender_sidecar_rank: int | None,
+        sender_sidecar_ranks: list[int] | None,
     ) -> None:
         """Initialize the worker."""
         # Cached variables
@@ -72,7 +73,7 @@ class Worker:
         self.tp_size = tp_size
         self.input_mq = input_mq
         self.response_mq = response_mq
-        self.sender_sidecar_rank = sender_sidecar_rank
+        self.sender_sidecar_ranks = sender_sidecar_ranks
 
         # Initialize torch.distributed and tensor parallelism
         init_distributed(world_size=tp_size, rank=tp_rank)
@@ -81,13 +82,14 @@ class Worker:
         self.model = load_model(model_name_or_path=model_id)
 
         # Initialize the sender sidecar client
-        if sender_sidecar_rank is not None:
-            self.sender_sidecar_client = TensorSidecarSender(
-                sidecar_rank=sender_sidecar_rank,
-                slot_shape=self.model.chunk_shape,
-                dtype=self.model.dtype,
-                shard_rank=tp_rank,
-                num_shards=tp_size,
+        if sender_sidecar_ranks:
+            self.sender_sidecar_client = Sidecar(
+                config=SidecarConfig(
+                    sidecar_rank=sender_sidecar_ranks[tp_rank],
+                    group=sender_sidecar_ranks,
+                    send_tensor_dtype=self.model.dtype,
+                    send_tensor_shape=(-1, *self.model.chunk_shape),
+                )
             )
         else:
             self.sender_sidecar_client = None
@@ -98,7 +100,7 @@ class Worker:
         tp_rank: int,
         tp_size: int,
         input_mq_handle: MessageQueueHandle,
-        sender_sidecar_rank: int | None,
+        sender_sidecar_ranks: list[int] | None,
     ) -> WorkerHandle:
         """Spawn the worker process.
 
@@ -121,7 +123,7 @@ class Worker:
                 tp_size=tp_size,
                 input_mq_handle=input_mq_handle,
                 ready_zmq_path=ready_zmq_path,
-                sender_sidecar_rank=sender_sidecar_rank,
+                sender_sidecar_ranks=sender_sidecar_ranks,
             ),
             daemon=True,
         )
@@ -155,7 +157,7 @@ class Worker:
         tp_size: int,
         input_mq_handle: MessageQueueHandle,
         ready_zmq_path: str,
-        sender_sidecar_rank: int | None,
+        sender_sidecar_ranks: list[int] | None,
     ) -> None:
         """Entrypoint for the worker process when it's spawned.
 
@@ -203,7 +205,7 @@ class Worker:
                 tp_size=tp_size,
                 input_mq=input_mq,
                 response_mq=response_mq,
-                sender_sidecar_rank=sender_sidecar_rank,
+                sender_sidecar_ranks=sender_sidecar_ranks,
             )
 
             # Wait until the message queues are ready. Order is critical.
@@ -297,16 +299,13 @@ class Worker:
                 if request_id in unique_spans:
                     context = trace.set_span_in_context(unique_spans[request_id])
                     token = context_api.attach(context)
-                # TODO: When the sidecar supports broadcast, this should be
-                # rewritten to a single send call.
-                for dst_ranks in dst_sidecar_ranks:
-                    self.sender_sidecar_client.send(
-                        chunk=output[i],
-                        id=batch.data_ids[i],
-                        chunk_id=batch.chunk_ids[i],
-                        num_chunks=batch.num_chunks[i],
-                        dst_sidecar_ranks=dst_ranks,
-                    )
+                self.sender_sidecar_client.send(
+                    data=output[i],
+                    id=batch.data_ids[i],
+                    chunk_id=batch.chunk_ids[i],
+                    num_chunks=batch.num_chunks[i],
+                    dst_sidecar_ranks=dst_sidecar_ranks,
+                )
                 if token:
                     context_api.detach(token)
                     unique_spans[request_id].end()

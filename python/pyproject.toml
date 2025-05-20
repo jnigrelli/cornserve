@@ -31,10 +31,16 @@ cornserve = "cornserve.cli:main"
 frontend = [
   "websocket-client",
 ]
-sidecar = [
-  "torch",
+sidecar-api = [
+  "torch>=2.5.0",
   "opentelemetry-instrumentation-grpc",
   "opentelemetry-instrumentation-threading",
+]
+sidecar = [
+  "torch>=2.5.0",
+  "ucxx-cu12",
+  "msgspec",
+  "opentelemetry-instrumentation-grpc",
 ]
 gateway = [
   "fastapi",
@@ -42,6 +48,7 @@ gateway = [
   "opentelemetry-instrumentation-fastapi",
   "opentelemetry-instrumentation-grpc",
   "opentelemetry-instrumentation-httpx",
+  "websocket-client",
 ]
 resource-manager = [
   "opentelemetry-instrumentation-grpc",
@@ -66,7 +73,7 @@ eric-no-gpu = [
   "pillow",
   "opencv-python-headless",
   "einops",
-  "cornserve[sidecar]",
+  "cornserve[sidecar-api]",
   "opentelemetry-instrumentation-fastapi",
   "opentelemetry-instrumentation-threading",
 ]
@@ -77,9 +84,9 @@ dev-common = [
   "ruff",
   "pytest",
   "pytest-asyncio",
-  "cornserve[sidecar,gateway,resource-manager,task-manager,task-dispatcher,frontend]",
+  "cornserve[frontend,sidecar-api,gateway,resource-manager,task-manager,task-dispatcher]",
 ]
-dev = ["cornserve[dev-common,eric]"]
+dev = ["cornserve[dev-common,sidecar,eric]"]
 dev-no-gpu = ["cornserve[dev-common,eric-no-gpu]"]
 
 [tool.setuptools.dynamic]
