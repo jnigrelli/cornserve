@@ -1,0 +1,113 @@
+# Project information
+site_name: Cornserve
+site_url: https://cornstarch-org.github.io/cornserve
+site_author: Cornserve team
+site_description: Easy, fast, and scalable multimodal agentic AI
+edit_uri: ""
+
+# Repository
+repo_name: cornstarch-org/cornserve
+repo_url: https://github.com/cornstarch-org/cornserve
+
+# Copyright
+copyright: Copyright &copy; 2025 Cornserve team
+
+# Theme configuration
+theme:
+  name: material
+  favicon: assets/img/favicon.png
+  icon:
+    repo: fontawesome/brands/github
+    logo: material/rocket-launch-outline
+  features:
+    - content.code.copy
+    - search.suggest
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.top
+    - navigation.indexes
+    - content.tooltips
+    - announce.dismiss
+  palette:
+    - scheme: light
+      primary: black
+      accent: amber
+
+# MkDocs plugins
+plugins:
+  - search
+  - autorefs
+  - social:
+      enabled: !ENV [BUILD_SOCIAL_CARD, false]
+      cards_dir: assets/img/social
+  - mkdocs-video:
+      is_video: True
+      video_autoplay: True
+      css_style:
+        width: 60%
+  - mkdocs-jupyter
+
+# Extensions
+markdown_extensions:
+  - meta
+  - abbr
+  - admonition
+  - attr_list
+  - footnotes
+  - md_in_html
+  - pymdownx.superfences
+  - pymdownx.snippets
+  - pymdownx.details
+  - pymdownx.critic
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+
+# Page tree
+nav:
+  - Cornserve: index.md
+  - Getting Started:
+    - getting_started/index.md
+    - Deploying Cornserve: getting_started/cornserve.md
+    - Building Apps: getting_started/building_apps.md
+    - Using Jupyter Notebook: getting_started/jupyter.ipynb
+    - Registering and Invoking Apps: getting_started/registering_apps.md
+  - Architecture:
+    - architecture/index.md
+    - Task: architecture/task.md
+    - Sidecar: architecture/sidecar.md
+    - Eric: architecture/eric.md
+  - Contributor Guide:
+    - contributor_guide/index.md
+    - Eric: contributor_guide/eric.md
+    - Sidecar: contributor_guide/sidecar.md
+    - Tracing: contributor_guide/tracing.md
+
+# Exclude file list
+exclude_docs: |
+  requirements.txt
+
+# For Mathjax
+extra_javascript:
+  - assets/js/mathjax.js
+  - https://polyfill.io/v3/polyfill.min.js?features=es6
+  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
+
+# Extra stuff
+extra:
+  analytics:
+    provider: !ENV SITE_ANALYTICS
+    property: G-8YY3G9ZZW5
+  social:
+    - name: Cornserve GitHub repository
+      icon: fontawesome/brands/github
+      link: https://github.com/cornstarch-org/cornserve
