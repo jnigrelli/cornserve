@@ -8,7 +8,7 @@ spec:
     spec:
       containers:
       - name: gateway
-        imagePullPolicy: Always
+        imagePullPolicy: Never
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -20,7 +20,7 @@ spec:
     spec:
       containers:
       - name: resource-manager
-        imagePullPolicy: Always
+        imagePullPolicy: Never
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -32,4 +32,4 @@ spec:
     spec:
       containers:
       - name: task-dispatcher
-        imagePullPolicy: Always
+        imagePullPolicy: Never

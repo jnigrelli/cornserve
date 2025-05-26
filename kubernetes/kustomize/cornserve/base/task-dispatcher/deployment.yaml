@@ -20,9 +20,12 @@ spec:
       containers:
       - name: task-dispatcher
         image: cornserve/task-dispatcher:latest
-        imagePullPolicy: Always
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 50051
           name: grpc
         - containerPort: 8000
           name: http
+        envFrom:
+        - configMapRef:
+            name: cornserve-config

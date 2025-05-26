@@ -1,3 +1,3 @@
-# Deploying on Kubernetes
+# Kubernetes
 
-Please refer to our [documentation](https://cornstarch.io/cornserve/getting-started/cornserve/) for instructions on deploying Cornserve on Kubernetes.
+Please refer to our documentation for guides on [deploying](https://cornserve.ai/getting_started/cornserve/) and [developing](https://cornserve.ai/contributor_guide/kubernetes/) on Kubernetes.

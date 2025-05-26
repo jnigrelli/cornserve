@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 
+# This script spins up a Docker registry container.
+# You potentially want to tweak the volume path to match your setup.
+
 set -evo pipefail
 
 docker run -d \

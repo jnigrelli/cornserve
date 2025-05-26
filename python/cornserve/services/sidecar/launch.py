@@ -41,7 +41,7 @@ class SidecarLaunchInfo:
                     kclient.V1Container(
                         name="sidecar",
                         image=constants.CONTAINER_IMAGE_SIDECAR,
-                        image_pull_policy="Always",
+                        image_pull_policy=constants.CONTAINER_IMAGE_PULL_POLICY,
                         security_context=kclient.V1SecurityContext(
                             privileged=True,
                         ),
@@ -52,6 +52,13 @@ class SidecarLaunchInfo:
                                 world_size,
                                 peer_ranks,
                             )
+                        ],
+                        env_from=[
+                            kclient.V1EnvFromSource(
+                                config_map_ref=kclient.V1ConfigMapEnvSource(
+                                    name=constants.K8S_CORNSERVE_CONFIG_MAP_NAME
+                                )
+                            ),
                         ],
                         volume_mounts=[
                             kclient.V1VolumeMount(

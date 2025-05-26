@@ -21,7 +21,10 @@ spec:
       containers:
       - name: resource-manager
         image: cornserve/resource-manager:latest
-        imagePullPolicy: Always
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 50051
           name: grpc
+        envFrom:
+        - configMapRef:
+            name: cornserve-config
