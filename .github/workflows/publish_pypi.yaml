@@ -1,0 +1,35 @@
+name: Publish Python package to PyPI
+
+on:
+  push:
+    tags:
+      - v*
+
+jobs:
+  pypi-publish:
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'cornserve-ai'
+    permissions:
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ secrets.SUBMODULE_TOKEN }}
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.11
+          cache: 'pip'
+      - name: Install protobuf dependencies
+        run: pip install grpcio-tools
+      - name: Generate protobuf files
+        run: bash scripts/generate_pb.sh
+      - name: Build source distribution
+        run: cd python && pip install build && python -m build
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: python/dist/
+
