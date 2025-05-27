@@ -10,10 +10,36 @@ hide:
 </div>
 
 <div align="center" class="video-container">
-  <video autoplay muted playsinline alt="type:video">
-    <source src="assets/video/cornserve.mp4" type="video/mp4">
-  </video>
+  <video src="assets/video/cornserve.mp4" id="video" 
+     muted
+     autoplay
+     playsinline
+     webkit-playsinline="true" 
+     x-webkit-airplay="true"
+     alt="type:video"
+     type="video/mp4">
+    </video>
 </div>
+
+<script>
+// snippets to fix video in WeChat Browsers
+// for IOS
+document.addEventListener('WeixinJSBridgeReady', function() {
+  const video = document.getElementById('video');
+  video.play();
+});
+// for Andriod
+document.addEventListener('DOMContentLoaded', function() {
+  const userAgent = navigator.userAgent;
+  if (userAgent.includes('WeChat') && /Android/.test(userAgent)) {
+    const video = document.getElementById('video');
+    if (video) {
+      video.setAttribute('controls', 'controls');
+    }
+  }
+});
+
+</script>
 
 Cornserve is an execution platform for multimodal AI.
 It performs **model fission** and **automatic sharing** of common components across applications on your infrastructure.
