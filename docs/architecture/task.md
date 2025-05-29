@@ -76,7 +76,7 @@ A Unit Task class that is registered in the system can be deployed on the data p
 4. When the Task Manager is running, the Resource Manager notifies the Task Dispatcher with the unit task instance and Task Manager deployment information.
 
 Deployed Unit Tasks become invocable, either as part of Composite Tasks or directly.
-Invocation can be driven by a static App driver registered in the Gateway service, a human user via our Jupyter Notebook interace.
+Invocation can be driven by a static App driver registered in the Gateway service, a human user via our Jupyter Notebook interface.
 
 ### Invocation
 

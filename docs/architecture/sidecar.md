@@ -13,9 +13,9 @@ One obvious way to do P2P communication of tensors across the cluster is to use 
 However, there are several problems with this approach:
 
 1. NCCL has a fixed world size that cannot be changed. Faults in one rank will disrupt the whole cluster.
-2. NCCL is bound to the process that creates the communicator. This means that NCCL is not amenable to Cornserve autoscaling Task Manager resources which lead to Task Executors being killed and spawned.
+2. NCCL is bound to the process that creates the communicator. This means that NCCL is not amenable to Cornserve auto-scaling Task Manager resources which lead to Task Executors being killed and spawned.
 3. NCCL spawns a high-speed polling CUDA kernel that takes up the GPU's SM, potentially leading to performance degradation for actual computation tasks that should be running on the GPU.
-4. NCCL may also use NVLink for tensor transfer, which can interfer with the NVLink bandwidth needs for Task Executors (e.g., tensor parallelism).
+4. NCCL may also use NVLink for tensor transfer, which can interfere with the NVLink bandwidth needs for Task Executors (e.g., tensor parallelism).
 
 Instead, each Task Executor runs alongside a long-running Sidecar server, and performs P2P communication with other Task Executors via the sidecar servers.
 This liberates the Task Executors from the constraints of NCCL.

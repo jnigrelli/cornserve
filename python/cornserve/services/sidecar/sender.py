@@ -16,6 +16,11 @@ from cornserve.services.sidecar.shm_manager import (
     SharedMemoryBuffer,
     SharedMemoryManager,
 )
+from cornserve.sidecar.constants import (
+    chunk_tag,
+    grpc_url_from_rank,
+    shm_filename,
+)
 from cornserve.sidecar.serde import (
     ForwardTensorHandle,
     MsgpackDecoder,
@@ -24,10 +29,7 @@ from cornserve.sidecar.serde import (
 )
 from cornserve.sidecar.utils import (
     buffer_from_tensor,
-    chunk_tag,
     device_from_rank,
-    grpc_url_from_rank,
-    shm_filename,
 )
 
 logger = get_logger(__name__, [SidcarAdapter])

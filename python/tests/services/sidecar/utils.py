@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from cornserve.services.pb import sidecar_pb2, sidecar_pb2_grpc
-from cornserve.sidecar.utils import grpc_url_from_rank
+from cornserve.sidecar.constants import grpc_url_from_rank
 
 
 def run_server(rank: int, world_size: int, local_peer_ranks: list[int], shm_size: int) -> None:

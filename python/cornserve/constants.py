@@ -44,6 +44,9 @@ K8S_TASK_DISPATCHER_HTTP_URL = "http://task-dispatcher:8000"
 K8S_TASK_DISPATCHER_GRPC_URL = "task-dispatcher:50051"
 K8S_RESOURCE_MANAGER_GRPC_URL = "resource-manager:50051"
 K8S_OTEL_GRPC_URL = "http://jaeger-collector.cornserve-system.svc.cluster.local:4317"
+K8S_TASK_EXECUTOR_SECRET_NAME = "cornserve-env"
+K8S_TASK_EXECUTOR_HF_TOKEN_KEY = "hf-token"
+K8S_TASK_EXECUTOR_HEALTHY_TIMEOUT = 20 * 60.0
 
 # Container images.
 CONTAINER_IMAGE_TASK_MANAGER = _build_image_name("task-manager")

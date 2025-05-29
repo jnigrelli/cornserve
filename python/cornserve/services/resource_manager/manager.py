@@ -16,6 +16,8 @@ from cornserve import constants
 from cornserve.logging import get_logger
 from cornserve.services.pb import (
     common_pb2,
+    sidecar_pb2,
+    sidecar_pb2_grpc,
     task_dispatcher_pb2,
     task_dispatcher_pb2_grpc,
     task_manager_pb2,
@@ -23,6 +25,7 @@ from cornserve.services.pb import (
 )
 from cornserve.services.resource_manager.resource import GPU, Resource
 from cornserve.services.sidecar.launch import SidecarLaunchInfo
+from cornserve.sidecar.constants import grpc_url_from_rank
 from cornserve.task.base import UnitTask
 
 logger = get_logger(__name__)
@@ -172,8 +175,9 @@ class ResourceManager:
                 else:
                     created_pods.append(result)
                     logger.info("Successfully spawned sidecar pod for GPU %s", gpus[i])
-            if failed:
-                # Clean up any created pods
+
+            async def cleanup():
+                """Clean up any created pods in case of failure."""
                 cleanup_coros = []
                 with suppress(kclient.ApiException):
                     for pod in created_pods:
@@ -184,9 +188,37 @@ class ResourceManager:
                             )
                         )
                     await asyncio.gather(*cleanup_coros, return_exceptions=True)
-                raise RuntimeError(f"Failed to spawn {failed} sidecar pods: {spawn_results}")
 
-            # TODO (Jeff): CheckHealth with Timeout
+            if failed:
+                await cleanup()
+                raise RuntimeError(f"Failed to spawn {failed} sidecar pods: {spawn_results}")
+            else:
+
+                async def wait_for_online(rank: int) -> None:
+                    """Wait for sidecar with `rank` to be online."""
+                    while True:
+                        try:
+                            async with grpc.aio.insecure_channel(grpc_url_from_rank(rank)) as channel:
+                                req = sidecar_pb2.CheckHealthRequest()
+                                stub = sidecar_pb2_grpc.SidecarStub(channel)
+                                res = await stub.CheckHealth(req)
+                                if res.status == sidecar_pb2.HealthStatus.HEALTH_ALL_GOOD:
+                                    logger.info("Sidecar %d is online", rank)
+                                    return
+                                await asyncio.sleep(1)
+                        except Exception:
+                            await asyncio.sleep(1)
+
+                coros = [wait_for_online(gpu.global_rank) for gpu in gpus]
+                try:
+                    async with asyncio.timeout(SidecarLaunchInfo.DEFAULT_LAUNCH_TIMEOUT):
+                        await asyncio.gather(*coros)
+                except TimeoutError as e:
+                    logger.error("Timed out waiting for sidecars to come online")
+                    await cleanup()
+                    raise RuntimeError(f"Failed to spawn {failed} sidecar pods: {spawn_results}") from e
+                logger.info("All sidecars are online")
+
             resource = Resource(gpus=gpus)
             return ResourceManager(
                 api_client=api_client,

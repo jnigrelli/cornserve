@@ -20,13 +20,15 @@ from opentelemetry.instrumentation.threading import ThreadingInstrumentor
 
 from cornserve.logging import get_logger
 from cornserve.services.pb import common_pb2, sidecar_pb2, sidecar_pb2_grpc
+from cornserve.sidecar.constants import (
+    grpc_url_from_rank,
+    shm_filename,
+)
 from cornserve.sidecar.schema import SidecarConfig
 from cornserve.sidecar.serde import MsgpackDecoder, MsgpackEncoder, SharedTensorHandle
 from cornserve.sidecar.utils import (
     device_from_rank,
-    grpc_url_from_rank,
     init_shmem,
-    shm_filename,
 )
 
 logger = get_logger(__name__)

@@ -31,7 +31,7 @@ from cornserve.services.pb import common_pb2, sidecar_pb2, sidecar_pb2_grpc
 from cornserve.services.sidecar.receiver import SidecarReceiver
 from cornserve.services.sidecar.schema import SidecarNodeInfo, SidecarServerConfig
 from cornserve.services.sidecar.sender import SidecarSender
-from cornserve.sidecar.utils import (
+from cornserve.sidecar.constants import (
     GRPC_BASE_PORT,
     UCX_BASE_PORT,
     grpc_url_from_rank,

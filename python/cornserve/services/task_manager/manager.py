@@ -55,7 +55,7 @@ class TaskManager:
         self.core_client = kclient.CoreV1Api(api_client=self.k8s_client)
 
         # Config variables
-        self.task_executor_healthy_timeout = 10 * 60.0
+        self.task_executor_healthy_timeout = constants.K8S_TASK_EXECUTOR_HEALTHY_TIMEOUT
 
     @classmethod
     async def init(cls, id: str, task: UnitTask, gpus: list[GPU]) -> TaskManager:
@@ -276,6 +276,7 @@ class TaskManager:
                 },
             ),
             spec=kclient.V1PodSpec(
+                restart_policy="Never",
                 containers=[
                     kclient.V1Container(
                         name="task-executor",
@@ -292,6 +293,16 @@ class TaskManager:
                             kclient.V1EnvVar(
                                 name="NVIDIA_VISIBLE_DEVICES",
                                 value=",".join(str(gpu.local_rank) for gpu in gpus),
+                            ),
+                            kclient.V1EnvVar(
+                                name="HF_TOKEN",
+                                value_from=kclient.V1EnvVarSource(
+                                    secret_key_ref=kclient.V1SecretKeySelector(
+                                        name=constants.K8S_TASK_EXECUTOR_SECRET_NAME,
+                                        key=constants.K8S_TASK_EXECUTOR_HF_TOKEN_KEY,
+                                        optional=True,
+                                    ),
+                                ),
                             ),
                         ],
                         volume_mounts=[

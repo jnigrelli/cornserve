@@ -10,7 +10,8 @@ import torch
 from ucxx._lib_async.endpoint import Endpoint  # type: ignore
 
 from cornserve.services.sidecar.shm_manager import SharedMemoryBuffer
-from cornserve.sidecar.utils import init_shmem, shm_filename
+from cornserve.sidecar.constants import shm_filename
+from cornserve.sidecar.utils import init_shmem
 
 
 # To allow grouping, we need to bookkeep the mapping between global rank and local rank

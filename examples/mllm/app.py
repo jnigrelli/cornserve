@@ -30,7 +30,8 @@ class Response(AppResponse):
 
 
 mllm = MLLMTask(
-    model_id="Qwen/Qwen2-VL-7B-Instruct",
+    # model_id="Qwen/Qwen2-VL-7B-Instruct",
+    model_id="google/gemma-3-4b-it",
     modalities=[Modality.IMAGE],
 )
 
