@@ -1,7 +1,9 @@
-"""Tests for the Qwen2.5-VL model's vision encoder."""
+"""Tests for the Qwen2.5-Omni model's vision and audio encoders."""
 
+import pytest
 import torch
-from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
+from transformers.models.auto.processing_auto import AutoProcessor
+from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import Qwen2_5OmniForConditionalGeneration
 
 from cornserve.task_executors.eric.distributed.parallel import destroy_distributed, init_distributed
 from cornserve.task_executors.eric.executor.executor import ModelExecutor
@@ -18,14 +20,14 @@ from ..utils import (
     param_tp_size,
 )
 
-model_id = "Qwen/Qwen2.5-VL-7B-Instruct"
-model_shorthand = "qwen2_5"
+model_id = "Qwen/Qwen2.5-Omni-7B"
+model_shorthand = "qwen2_5_omni"
 
 
 def test_weight_loading() -> None:
     """Check if weights are loaded correctly."""
     # Hugging Face model output
-    hf_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(model_id, torch_dtype="auto").visual
+    hf_model = Qwen2_5OmniForConditionalGeneration.from_pretrained(model_id, torch_dtype="auto").thinker
 
     # Load our model
     init_distributed(world_size=1, rank=0)
@@ -60,17 +62,69 @@ def test_video_inference(test_videos: list[ModalityData], tp_size: int, dump_ten
     executor.shutdown()
 
 
-@depends_on("test_image_inference", "test_video_inference")
-def test_hf_reference(test_images: list[ModalityData], test_videos: list[ModalityData], dump_tensors: str) -> None:
+@param_tp_size
+def test_audio_inference(test_audios: list[ModalityData], tp_size: int, dump_tensors: str) -> None:
+    """Test if inference works correctly."""
+    executor = ModelExecutor(model_id=model_id, tp_size=tp_size, sender_sidecar_ranks=None)
+
+    result = executor.execute_model(batch=batch_builder(model_id, model_shorthand, test_audios[:2]))
+
+    assert result.status == Status.SUCCESS
+
+    executor.shutdown()
+
+
+@depends_on("test_image_inference", "test_video_inference", "test_audio_inference")
+def test_hf_reference(
+    test_audios: list[ModalityData],
+    test_images: list[ModalityData],
+    test_videos: list[ModalityData],
+    dump_tensors: str,
+) -> None:
     """Generate reference outputs from the Hugging Face model."""
     torch.set_grad_enabled(False)
 
-    hf_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+    hf_model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
         model_id,
         torch_dtype="auto",
         attn_implementation="flash_attention_2",
     )
-    model = hf_model.model.cuda().eval()
+    model = hf_model.thinker.cuda().eval()
+    del model.model
+
+    processor = AutoProcessor.from_pretrained(model_id)
+
+    audio1 = processor.feature_extractor(
+        [test_audios[0].raw()],
+        sampling_rate=processor.feature_extractor.sampling_rate,
+        padding="max_length",
+        return_attention_mask=True,
+        return_tensors="pt",
+    )
+    input_features = audio1["input_features"].cuda()
+    feature_attention_mask = audio1["attention_mask"].cuda()
+    output1 = model.get_audio_features(
+        input_features=input_features, feature_attention_mask=feature_attention_mask
+    ).cpu()
+
+    audio2 = processor.feature_extractor(
+        [test_audios[1].raw()],
+        sampling_rate=processor.feature_extractor.sampling_rate,
+        padding="max_length",
+        return_attention_mask=True,
+        return_tensors="pt",
+    )
+    input_features = audio2["input_features"].cuda()
+    feature_attention_mask = audio2["attention_mask"].cuda()
+    output2 = model.get_audio_features(
+        input_features=input_features, feature_attention_mask=feature_attention_mask
+    ).cpu()
+
+    for tp_degree in TP_SIZES:
+        output = torch.load(f"{dump_tensors}/{model_shorthand}-audio-tp{tp_degree}.pt")
+        assert_similar([output1, output2], output)
+
+    del output1, output2
 
     image1 = test_images[0].processed(model_id)
     pixel_values = torch.asarray(image1["pixel_values"]).cuda()
@@ -103,3 +157,6 @@ def test_hf_reference(test_images: list[ModalityData], test_videos: list[Modalit
         assert_similar([output1, output2], output)
 
     del output1, output2
+
+
+pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")

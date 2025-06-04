@@ -21,6 +21,13 @@ from opentelemetry import trace
 from PIL import Image
 from transformers.models.auto.configuration_auto import AutoConfig
 
+try:
+    import librosa
+except ImportError:
+    from cornserve.task_executors.eric.utils.package import PlaceholderModule
+
+    librosa = PlaceholderModule("librosa", "eric-audio")
+
 from cornserve.logging import get_logger
 from cornserve.task_executors.eric.api import EmbeddingData
 from cornserve.task_executors.eric.config import (
@@ -161,6 +168,36 @@ class ImageLoader(BaseLoader):
         return np.asarray(Image.open(filepath).convert("RGB"))
 
 
+class AudioLoader(BaseLoader):
+    """Handles loading audio data from various sources.
+
+    Uses librosa to load from an audio file. Sampling rate is preserved.
+    All audio is converted to mono, even if it were originally stereo.
+
+    Returns a tuple of (audio data, sample rate).
+    """
+
+    def __init__(self, config: ModalityConfig) -> None:
+        """Initialize the loader."""
+        if config.audio_config is None:
+            raise ValueError("Audio config must be set.")
+
+        self.config = config
+        self.sampling_rate = config.audio_config.sampling_rate
+
+    def load_bytes(self, data: bytes) -> npt.NDArray:
+        """Load video data from bytes."""
+        return librosa.load(BytesIO(data), sr=self.sampling_rate)[0]
+
+    def load_base64(self, media_type: str, data: str) -> npt.NDArray:
+        """Load audio data from base64 string."""
+        return self.load_bytes(base64.b64decode(data))
+
+    def load_file(self, filepath: str) -> npt.NDArray:
+        """Load audio data from file path."""
+        return librosa.load(filepath, sr=self.sampling_rate)[0]
+
+
 class VideoLoader(BaseLoader):
     """Handles loading videos from various sources."""
 
@@ -245,6 +282,7 @@ class ModalityDataLoader:
         self.session = requests.Session()
 
         self.image_loader = ImageLoader(config)
+        self.audio_loader = AudioLoader(config)
         self.video_loader = VideoLoader(config)
 
     @tracer.start_as_current_span(name="ModalityDataLoader.load_from_url")
@@ -253,6 +291,8 @@ class ModalityDataLoader:
         match modality:
             case Modality.IMAGE:
                 loader = self.image_loader
+            case Modality.AUDIO:
+                loader = self.audio_loader
             case Modality.VIDEO:
                 loader = self.video_loader
             case _:

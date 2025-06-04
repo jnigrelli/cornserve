@@ -50,7 +50,8 @@ class BaseModalityProcessor:
     inherits from this class. It should override `get_image_processor`,
     `get_video_processor`, etc. to return the appropriate processor for the
     given modality. The processor should be a callable that takes the input
-    modality data as a Numpy array and returns the processed data as
+    modality data as a Numpy array and returns the processed data as a
+    dictionary of Numpy arrays.
     """
 
     def __init__(self, model_id: str) -> None:
@@ -58,11 +59,24 @@ class BaseModalityProcessor:
         self.model_id = model_id
 
     def get_image_processor(self) -> Callable | None:
-        """Get the image processor for this modality."""
+        """Get the image processor for this modality.
+
+        The callable sould take a single image numpy array.
+        """
+        return None
+
+    def get_audio_processor(self) -> Callable | None:
+        """Get the audio processor for this modality.
+
+        The callable should take a tuple of (audio data numpy array, sample rate).
+        """
         return None
 
     def get_video_processor(self) -> Callable | None:
-        """Get the video processor for this modality."""
+        """Get the video processor for this modality.
+
+        The callable should take a single video numpy array.
+        """
         return None
 
     def process(self, modality: Modality, data: npt.NDArray) -> dict[str, npt.NDArray]:
@@ -73,6 +87,11 @@ class BaseModalityProcessor:
                 if image_processor is None:
                     raise ValueError("Image processor not available.")
                 return image_processor(data)
+            case Modality.AUDIO:
+                audio_processor = self.get_audio_processor()
+                if audio_processor is None:
+                    raise ValueError("Audio processor not available.")
+                return audio_processor(data)
             case Modality.VIDEO:
                 video_processor = self.get_video_processor()
                 if video_processor is None:

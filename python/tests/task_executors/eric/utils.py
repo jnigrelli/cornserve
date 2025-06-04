@@ -12,20 +12,24 @@ import pytest
 import torch
 import torch.nn as nn
 
-from cornserve.task_executors.eric.config import ImageDataConfig, ModalityConfig, VideoDataConfig
-from cornserve.task_executors.eric.router.processor import Processor
+from cornserve.task_executors.eric.config import AudioDataConfig, ImageDataConfig, ModalityConfig, VideoDataConfig
+from cornserve.task_executors.eric.router.processor import ModalityDataLoader, Processor
 from cornserve.task_executors.eric.schema import Modality, WorkerBatch
 
 TEST_NUM_GPUS: list[int] = [1, 2, 4, 8]
 
-try:
-    CURR_NUM_GPUS = int(
-        subprocess.check_output(["nvidia-smi", "--query-gpu=count", "--format=csv,noheader,nounits", "-i", "0"])
-        .strip()
-        .decode()
-    )
-except subprocess.CalledProcessError:
-    CURR_NUM_GPUS = 0
+if (visible_devices := os.getenv("CUDA_VISIBLE_DEVICES")) is not None:
+    # If CUDA_VISIBLE_DEVICES is set, use it to determine the number of GPUs
+    CURR_NUM_GPUS = len(visible_devices.split(","))
+else:
+    try:
+        CURR_NUM_GPUS = int(
+            subprocess.check_output(["nvidia-smi", "--query-gpu=count", "--format=csv,noheader,nounits", "-i", "0"])
+            .strip()
+            .decode()
+        )
+    except subprocess.CalledProcessError:
+        CURR_NUM_GPUS = 0
 
 
 TP_SIZES = [tp for tp in [1, 2, 4, 8] if tp <= CURR_NUM_GPUS]
@@ -64,13 +68,20 @@ class ModalityData:
             num_workers=1,
             image_config=ImageDataConfig(),
             video_config=VideoDataConfig(max_num_frames=32),
+            audio_config=AudioDataConfig(),
         )
+        self.loader = ModalityDataLoader(self.modality_config)
 
     @cache
     def processed(self, model_id: str) -> dict[str, npt.NDArray]:
         """Process the data for the given model."""
         processor = Processor(model_id, self.modality_config)
         return processor._do_process(self.modality, self.url)
+
+    @cache
+    def raw(self) -> npt.NDArray:
+        """Download the data and return it as a raw numpy array."""
+        return self.loader.load_from_url(self.modality, self.url)
 
 
 def assert_same_weights(
