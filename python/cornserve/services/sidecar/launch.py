@@ -109,8 +109,12 @@ class SidecarLaunchInfo:
     @staticmethod
     def get_container_volumes() -> list[tuple[str, str, str]]:
         """Get the container volumes for the sidecar."""
-        return [
+        import os
+        volumes = [
             ("shm", constants.VOLUME_SHM, "/dev/shm"),
-            ("infiniband-class", "/sys/class/infiniband", "/sys/class/infiniband"),
-            ("infiniband-dev", "/dev/infiniband", "/dev/infiniband"),
         ]
+        if os.path.exists("/sys/class/infiniband"):
+            volumes.append(("infiniband-class", "/sys/class/infiniband", "/sys/class/infiniband"))
+        if os.path.exists("/dev/infiniband"):
+            volumes.append(("infiniband-dev", "/dev/infiniband", "/dev/infiniband"))
+        return volumes
