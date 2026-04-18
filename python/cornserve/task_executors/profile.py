@@ -16,13 +16,18 @@ from typing import TYPE_CHECKING, Any
 from kubernetes_asyncio import client, config
 from pydantic import BaseModel
 
-from cornserve.constants import (
-    CRD_GROUP,
-    CRD_KIND_UNIT_TASK_PROFILE,
-    CRD_PLURAL_UNIT_TASK_PROFILES,
-    CRD_VERSION,
-    K8S_NAMESPACE,
-)
+try:
+    from cornserve.constants import (
+        CRD_GROUP,
+        CRD_PLURAL_UNIT_TASK_PROFILES,
+        CRD_VERSION,
+        K8S_NAMESPACE,
+    )
+except ImportError:
+    CRD_GROUP = "cornserve.ai"
+    CRD_VERSION = "v1"
+    CRD_PLURAL_UNIT_TASK_PROFILES = "unittaskprofiles"
+    K8S_NAMESPACE = "cornserve"
 from cornserve.logging import get_logger
 from cornserve.services.task_registry.task_class_registry import TASK_CLASS_REGISTRY
 
@@ -145,7 +150,7 @@ class UnitTaskProfileManager:
     async CRUD operations for profile resources.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, **kwargs: object) -> None:
         """Initialize lazy Kubernetes API clients."""
         self._api_client: client.ApiClient | None = None
         self._custom_api: client.CustomObjectsApi | None = None
@@ -178,7 +183,7 @@ class UnitTaskProfileManager:
 
         body = {
             "apiVersion": f"{CRD_GROUP}/{CRD_VERSION}",
-            "kind": CRD_KIND_UNIT_TASK_PROFILE,
+            "kind": "UnitTaskProfile",
             "metadata": {"name": profile_name, "namespace": namespace},
             "spec": {
                 "task": task_dict,
@@ -242,7 +247,14 @@ class UnitTaskProfileManager:
                     task_cls, _, _ = TASK_CLASS_REGISTRY.get_unit_task(task_class_name)
                     profile_task = task_cls.model_validate(task_data)
 
-                    if profile_task.is_equivalent_to(task):
+                    # Compare by class name + CRD field values to avoid class identity
+                    # issues that arise when task classes are loaded dynamically.
+                    task_data_fields = {k: v for k, v in task_data.items() if not k.startswith("__")}
+                    profile_matches = task_class_name == task.__class__.__name__ and all(
+                        getattr(task, k, None) == v for k, v in task_data_fields.items()
+                    )
+
+                    if profile_matches:
                         num_gpus_to_profile: dict[int, ProfileInfo] = {}
                         for gpu_count_str, profile_data in spec.get("numGpusToProfile", {}).items():
                             gpu_count = int(gpu_count_str)
