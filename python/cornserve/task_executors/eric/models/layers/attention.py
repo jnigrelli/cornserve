@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-from xformers.ops import memory_efficient_attention_forward  # type: ignore
+import torch.nn.functional as F
+
+try:
+    from xformers.ops import memory_efficient_attention_forward  # type: ignore
+    _XFORMERS_AVAILABLE = True
+except (ImportError, Exception):
+    _XFORMERS_AVAILABLE = False
 
 
 class Attention(nn.Module):
@@ -48,6 +54,15 @@ class Attention(nn.Module):
             key = torch.repeat_interleave(key, num_repeat, dim=2)
             value = torch.repeat_interleave(value, num_repeat, dim=2)
 
-        out = memory_efficient_attention_forward(query, key, value, scale=self.scale)
+        if _XFORMERS_AVAILABLE:
+            out = memory_efficient_attention_forward(query, key, value, scale=self.scale)
+        else:
+            # Fallback to PyTorch scaled dot product attention
+            # SDPA expects (batch, heads, seq, head_dim)
+            query = query.transpose(1, 2)
+            key = key.transpose(1, 2)
+            value = value.transpose(1, 2)
+            out = F.scaled_dot_product_attention(query, key, value, scale=self.scale)
+            out = out.transpose(1, 2)
 
         return out.reshape(bsz, q_len, -1)

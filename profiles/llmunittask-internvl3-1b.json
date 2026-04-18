@@ -1,0 +1,18 @@
+{
+  "task": {
+    "__class__": "LLMUnitTask",
+    "model_id": "OpenGVLab/InternVL3-1B",
+    "receive_embeddings": true,
+    "execution_descriptor_name": null
+  },
+  "num_gpus_to_profile": {
+    "1": {
+      "launch_args": [
+        "--max-model-len",
+        "8192",
+        "--gpu-memory-utilization",
+        "0.5"
+      ]
+    }
+  }
+}
