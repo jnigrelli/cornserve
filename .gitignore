@@ -187,3 +187,4 @@ cython_debug/
 
 # MacOS
 .DS_Store
+python/cornserve/services/task_dispatcher/predictor/*.joblib
