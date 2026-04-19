@@ -38,8 +38,8 @@ class RequestInput:
     multi_modal_data: list[dict[str, Any]]
     filenames: list[str] = field(default_factory=list)
     ignore_eos: bool = True
-
     encoder_fission: bool = False
+    prompt_embedding: list[float] | None = None
 
 
 @dataclass
@@ -274,6 +274,7 @@ async def cornserve_invoke(
             },
             "encoder_fission": request_input.encoder_fission,
             "ignore_eos": request_input.ignore_eos,
+            "prompt_embedding": request_input.prompt_embedding,
         }
 
         payload = {"request_data": request_data}
@@ -479,6 +480,16 @@ def transform_sampled_requests(
                 mm_data_list.append({"type": "image_url", "image_url": {"url": image_uri}})
         else:
             mm_data_list = [request.multi_modal_data]
+        embedding = None
+        if hasattr(request, "prompt_embedding") and request.prompt_embedding is not None:
+            import pandas as pd
+            emb = request.prompt_embedding
+            if isinstance(emb, pd.DataFrame):
+                embedding = emb.values[0].tolist()
+            elif hasattr(emb, "tolist"):
+                embedding = emb.tolist()
+            else:
+                embedding = list(emb)
         request_input = RequestInput(
             url=f"http://127.0.0.1:30080/app/invoke/{app_id}",
             model=config.model_id,
@@ -488,6 +499,7 @@ def transform_sampled_requests(
             multi_modal_data=mm_data_list,
             filenames=request.filenames,
             encoder_fission=request.encoder_fission,
+            prompt_embedding=embedding,
         )
         request_inputs.append(request_input)
     return request_inputs

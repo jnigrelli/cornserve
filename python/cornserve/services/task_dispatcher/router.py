@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, FastAPI, Request, Response, status
 from fastapi.responses import StreamingResponse
@@ -16,6 +17,13 @@ from cornserve.task.base import Stream, TaskGraphDispatch, TaskOutput
 router = APIRouter()
 logger = get_logger(__name__)
 tracer = trace.get_tracer(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await app.state.dispatcher.start()
+    yield
+    await app.state.dispatcher.shutdown()
 
 
 @router.post("/task")
@@ -60,14 +68,9 @@ async def health_check():
     return Response(status_code=status.HTTP_200_OK)
 
 
-def init_app_state(app: FastAPI) -> None:
-    """Initialize the app state for the Task Dispatcher."""
-    app.state.dispatcher = TaskDispatcher()
-
-
 def create_app() -> FastAPI:
     """Build the FastAPI app for the Task Dispatcher."""
-    app = FastAPI(title="Cornserve Task Dispatcher")
+    app = FastAPI(title="Cornserve Task Dispatcher", lifespan=lifespan)
+    app.state.dispatcher = TaskDispatcher()
     app.include_router(router)
-    init_app_state(app)
     return app

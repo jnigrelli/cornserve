@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import uuid
+from pathlib import Path
 from collections import defaultdict
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import aiohttp
@@ -21,6 +23,44 @@ from cornserve.task.forward import DataForward
 
 logger = get_logger(__name__)
 tracer = trace.get_tracer(__name__)
+
+
+class OutputLengthPredictor:
+    """Predicts output length bucket from a prompt embedding using the trained RLP model."""
+
+    _MODEL_DIR = Path(__file__).parent / "predictor"
+
+    def __init__(self) -> None:
+        import joblib
+        self._model = joblib.load(self._MODEL_DIR / "RLP.joblib")
+        self._encoder = joblib.load(self._MODEL_DIR / "workload_encoder.joblib")
+        logger.info("Loaded RLP model and encoder from %s", self._MODEL_DIR)
+
+    def predict(self, invocations: list[TaskInvocation]) -> int:
+        """Return predicted output length bucket (1–6, lower = shorter = higher SJF priority)."""
+        import pandas as pd
+
+        for inv in invocations:
+            ti = inv.task_input
+            embedding = ti.get("prompt_embedding") if isinstance(ti, dict) else getattr(ti, "prompt_embedding", None)
+            if embedding is None:
+                continue
+
+            input_modality = ti.get("input_modality", "image") if isinstance(ti, dict) else getattr(ti, "input_modality", "image")
+            output_modality = ti.get("output_modality", "text") if isinstance(ti, dict) else getattr(ti, "output_modality", "text")
+            prompt_len = ti.get("prompt_len", 500) if isinstance(ti, dict) else getattr(ti, "prompt_len", 500)
+
+            row = {
+                "input_modality": input_modality,
+                "output_modality": output_modality,
+                "input_len_bucket": prompt_len,
+                **{f"emb_{i}": v for i, v in enumerate(embedding)},
+            }
+            df = pd.DataFrame([row])
+            encoded = self._encoder.transform(df)
+            return int(self._model.predict(encoded)[0])
+
+        return 3  # fallback: mid-range bucket, degrades to near-FIFO
 
 
 class TaskInfo:
@@ -87,6 +127,15 @@ def iter_data_forwards(obj: object) -> Iterator[DataForward]:
             yield from iter_data_forwards(getattr(obj, name))
 
 
+@dataclass(order=True)
+class _SJFEntry:
+    """Priority queue entry. Ordered by (predicted_len, arrival_seq)."""
+    predicted_len: int
+    arrival_seq: int
+    invocations: list[TaskInvocation] = field(compare=False)
+    future: asyncio.Future = field(compare=False)
+
+
 class TaskDispatcher:
     """Task Dispatcher."""
 
@@ -101,6 +150,15 @@ class TaskDispatcher:
             timeout=aiohttp.ClientTimeout(total=TASK_TIMEOUT),
             connector=aiohttp.TCPConnector(limit=0),
         )
+
+        self.predictor = OutputLengthPredictor()
+        self._sjf_queue: asyncio.PriorityQueue[_SJFEntry] = asyncio.PriorityQueue()
+        self._arrival_counter = itertools.count()
+        self._worker: asyncio.Task | None = None
+
+    async def start(self) -> None:
+        """Start the SJF worker. Must be called from an async context after the event loop is running."""
+        self._worker = asyncio.create_task(self._sjf_worker())
 
     async def notify_task_deployment(self, task: UnitTask, task_manager_url: str) -> None:
         """Register a newly deployed task and its task manager with the dispatcher."""
@@ -146,20 +204,43 @@ class TaskDispatcher:
             if isinstance(result, BaseException):
                 logger.exception("Error occured while shutting down task dispatcher: %s", result)
 
+        if self._worker is not None:
+            self._worker.cancel()
+            self._worker = None
+
         await self.client.close()
 
         logger.info("Task dispatcher shutdown complete")
 
+    async def _sjf_worker(self) -> None:
+        """Process one request at a time in shortest-predicted-length-first order."""
+        while True:
+            entry = await self._sjf_queue.get()
+            try:
+                result = await self._dispatch(entry.invocations)
+                entry.future.set_result(result)
+            except Exception as e:
+                entry.future.set_exception(e)
+            finally:
+                self._sjf_queue.task_done()
+
     @tracer.start_as_current_span("TaskDispatcher.invoke")
     async def invoke(self, invocations: list[TaskInvocation]) -> list[TaskOutput]:
-        """Dispatch a graph of task invocations to task managers.
+        """Enqueue invocations under SJF and block until the worker executes them."""
+        predicted_len = self.predictor.predict(invocations)
+        future: asyncio.Future[list[TaskOutput]] = asyncio.get_event_loop().create_future()
+        entry = _SJFEntry(
+            predicted_len=predicted_len,
+            arrival_seq=next(self._arrival_counter),
+            invocations=invocations,
+            future=future,
+        )
+        await self._sjf_queue.put(entry)
+        logger.info("Enqueued request with predicted_len=%d (queue size=%d)", predicted_len, self._sjf_queue.qsize())
+        return await future
 
-        This method:
-        1. Gets routes for all tasks from their task managers
-        2. Collects and connects DataForward objects from inputs/outputs
-        3. Executes tasks concurrently and collects responses
-        4. Transforms executor responses back to task outputs
-        """
+    async def _dispatch(self, invocations: list[TaskInvocation]) -> list[TaskOutput]:
+        """Execute a full request graph: route → wire DataForwards → run concurrently."""
         span = trace.get_current_span()
         span.set_attributes(
             {

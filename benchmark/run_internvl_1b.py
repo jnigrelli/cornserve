@@ -1,47 +1,63 @@
 """Benchmark runner for InternVL3-1B on single GPU (encoder_fission=False)."""
 
 import asyncio
-import sys
 import os
+import pickle
+from dataclasses import dataclass, field
+from typing import Any
+import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 
 from benchmark_cornserve import benchmark, transform_sampled_requests
-from benchmark_dataset import VisionArenaDataset
 from schema import ExperimentConfig, VLLMConfig
-from transformers import AutoTokenizer
+
+
+class SJFVLLMConfig(VLLMConfig):
+    def to_subdir_name(self) -> str:
+        return f"vllm+replicas{self.num_replicas}+tp{self.tp_size}+sjf"
 
 from cornserve.utils import set_ulimit
 
-
-APP_ID = "app-5d8f3c0e5b61405fbaefc6863ca17847"
+APP_ID = "app-f15855b270b743c4ad552785ce4b7362"
 MODEL_ID = "OpenGVLab/InternVL3-1B"
+WORKLOAD_PATH = "/home/jnigrelli/cse585/frozen_vision_workload.pkl"
+
+
+@dataclass
+class SampleRequest:
+    """Represents a single inference request for benchmarking."""
+
+    prompt: str | Any
+    prompt_len: int
+    expected_output_len: int
+    # original image
+    multi_modal_data: dict[str, Any]
+    # synthetic data
+    image_urls: list[str] = field(default_factory=list)
+    filenames: list[str] = field(default_factory=list)
+    encoder_fission: bool = False
+    prompt_embedding: Any = False
+    input_modality: str = "image"
+    output_modality: str = "text"
+
+def load_workload(path: str, num_prompts: int):
+    with open(path, "rb") as f:
+        data = pickle.load(f)
+    return data[:num_prompts]
 
 
 async def run() -> None:
     set_ulimit()
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
-
-    dataset = VisionArenaDataset(
-        dataset_path="lmarena-ai/VisionArena-Chat",
-        dataset_split="train",
-        random_seed=48105,
-    )
-
     num_prompts = 200
-    input_len = 256
-    output_len = 128
 
-    sampled = dataset.sample(
-        tokenizer=tokenizer,
-        num_requests=num_prompts,
-        input_len=input_len,
-        output_len=output_len,
-    )
-    print(f"Sampled {len(sampled)} requests from VisionArena.")
+    sampled = load_workload(WORKLOAD_PATH, num_prompts)
+    print(f"Loaded {len(sampled)} requests from frozen workload.")
+    print(f"  prompt_len={sampled[0].prompt_len}, expected_output_len={sampled[0].expected_output_len}")
+    print(f"  prompt_embedding shape: {sampled[0].prompt_embedding.shape}")
 
-    backend_config = VLLMConfig(num_replicas=1, tp_size=1)
+    backend_config = SJFVLLMConfig(num_replicas=1, tp_size=1)
 
     for request_rate in [0.5, 1.0, 2.0]:
         config = ExperimentConfig(
@@ -52,17 +68,15 @@ async def run() -> None:
             num_gpus=1,
             num_prompts=num_prompts,
             num_warmups=5,
-            input_len=input_len,
-            output_len=output_len,
+            input_len=sampled[0].prompt_len,
+            output_len=sampled[0].expected_output_len,
             request_rate=request_rate,
             burstiness=1.0,
             image_probability=1.0,
-            image_width=640,
-            image_height=480,
             image_count=1,
-            image_choices=5,
+            image_choices=1,
             encoder_fission_probability=0.0,
-            use_synthesized_data=True,
+            use_synthesized_data=False,  # use the real base64 images from the pickle
         )
 
         if config.exists():

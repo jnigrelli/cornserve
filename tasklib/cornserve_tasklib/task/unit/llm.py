@@ -96,6 +96,7 @@ class OpenAIChatCompletionRequest(TaskInput):
     cornserve_embeddings: list[DataForward[Tensor]] = []
     cornserve_kv_transfer_params: DataForward[dict] | None = None
     encoder_fission: bool = True  # not currently used
+    prompt_embedding: list[float] | None = None  # pre-computed embedding for SJF prediction
 
 
 def extract_multimodal_content(
