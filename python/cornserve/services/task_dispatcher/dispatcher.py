@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import heapq 
+import itertools
 import uuid
 from collections import defaultdict
 from collections.abc import Iterator
@@ -86,6 +88,24 @@ def iter_data_forwards(obj: object) -> Iterator[DataForward]:
         for name in obj.__class__.model_fields:
             yield from iter_data_forwards(getattr(obj, name))
 
+class SJFScheduler:
+    def __init__(self):
+        self.ready_queue = []
+        self.arrival_counter = itertools.count() #breaks ties 
+
+    def enqueue(self, sample_request, bucket_idx):
+        count = next(self.arrival_counter)
+        job_tuple = (bucket_idx, count, sample_request)
+        heapq.heappush(self.ready_queue, job_tuple)
+
+    def get_next(self):
+        if self.ready_queue:
+            popped_bucket, popped_count, sample_request = heapq.heappop(self.ready_queue)
+            return sample_request
+        return None
+
+    def has_jobs(self):
+        return len(self.ready_queue) > 0
 
 class TaskDispatcher:
     """Task Dispatcher."""
@@ -101,6 +121,8 @@ class TaskDispatcher:
             timeout=aiohttp.ClientTimeout(total=TASK_TIMEOUT),
             connector=aiohttp.TCPConnector(limit=0),
         )
+        self.scheduler = SJFScheduler()
+        self.worker_task = asyncio.create_task(self._scheduler_worker_loop())
 
     async def notify_task_deployment(self, task: UnitTask, task_manager_url: str) -> None:
         """Register a newly deployed task and its task manager with the dispatcher."""
@@ -262,25 +284,18 @@ class TaskDispatcher:
             assert data_forward.dst_sidecar_ranks is not None
 
         # Dispatch all task invocations to task executors
-        dispatch_coros: list[asyncio.Task[TaskOutput]] = []
-        try:
-            async with asyncio.TaskGroup() as tg:
-                for execution in task_executions:
-                    # `TaskInput` -> JSON request to task executor
-                    request = execution.invocation.task.execution_descriptor.to_request(
-                        task_input=execution.invocation.task_input,
-                        task_output=execution.invocation.task_output,
-                    )
-                    dispatch_coros.append(tg.create_task(self._execute_unit_task(execution, request)))
-        except (ExceptionGroup, Exception) as e:
-            logger.exception("Error while invoking task")
-            if isinstance(e, ExceptionGroup):
-                raise RuntimeError(f"Task invocation failed: {e.exceptions}") from e
-            else:
-                raise RuntimeError(f"Task invocation failed: {e}") from e
+        for execution in task_executions:
+            request = execution.invocation.task.execution_descriptor.to_request(
+                task_input=execution.invocation.task_input,
+                task_output=execution.invocation.task_output,
+            )
+            
+            # predicted length 
+            predicted_len = execution.invocation.task_input.expected_output_len 
+            payload = {"execution": execution, "request": request}
+            self.scheduler.enqueue(payload, predicted_len)
 
-        # Collect responses from task executors
-        return [task.result() for task in dispatch_coros]
+        return []
 
     async def _execute_unit_task(self, execution: UnitTaskExecution, request: dict[str, Any]) -> TaskOutput:
         """Execute a single task by sending request to executor and processing response."""
@@ -316,3 +331,17 @@ class TaskDispatcher:
             response=response,
         )
         return task_output
+    async def _scheduler_worker_loop(self):
+        """Continuously pulls the shortest job from the queue and executes it."""
+        while True:
+            if self.scheduler.has_jobs():
+                # Get the shortest job
+                shortest_job = self.scheduler.get_next()
+                execution = shortest_job["execution"]
+                request = shortest_job["request"]
+                
+                # Fire it off to cornserve! 
+                asyncio.create_task(self._execute_unit_task(execution, request))
+            else:
+                # Sleep briefly if the queue is empty so we don't fry the CPU
+                await asyncio.sleep(0.01)
