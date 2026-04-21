@@ -19,7 +19,7 @@ class SJFVLLMConfig(VLLMConfig):
 
 from cornserve.utils import set_ulimit
 
-APP_ID = "app-f15855b270b743c4ad552785ce4b7362"
+APP_ID = "app-683e4d3cd2ea479394eefd4644019238"
 MODEL_ID = "OpenGVLab/InternVL3-1B"
 WORKLOAD_PATH = "/home/jnigrelli/cse585/frozen_vision_workload.pkl"
 
@@ -59,7 +59,7 @@ async def run() -> None:
 
     backend_config = SJFVLLMConfig(num_replicas=1, tp_size=1)
 
-    for request_rate in [0.5, 1.0, 2.0]:
+    for request_rate in [0.5, 1.0, 2.0, 5.0]:
         config = ExperimentConfig(
             backend_config=backend_config,
             app_id=APP_ID,

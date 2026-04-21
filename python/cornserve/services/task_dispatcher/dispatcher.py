@@ -32,8 +32,8 @@ class OutputLengthPredictor:
 
     def __init__(self) -> None:
         import joblib
-        self._model = joblib.load(self._MODEL_DIR / "RLP.joblib")
-        self._encoder = joblib.load(self._MODEL_DIR / "workload_encoder.joblib")
+        self._model = joblib.load(self._MODEL_DIR / "RLP-retrain.joblib")
+        self._encoder = joblib.load(self._MODEL_DIR / "workload_encoder_retrain.joblib")
         logger.info("Loaded RLP model and encoder from %s", self._MODEL_DIR)
 
     def predict(self, invocations: list[TaskInvocation]) -> int:
@@ -42,7 +42,9 @@ class OutputLengthPredictor:
 
         for inv in invocations:
             ti = inv.task_input
+            logger.info("Predictor: task_input type=%s has_prompt_embedding=%s", type(ti).__name__, hasattr(ti, "prompt_embedding"))
             embedding = ti.get("prompt_embedding") if isinstance(ti, dict) else getattr(ti, "prompt_embedding", None)
+            logger.info("Predictor: embedding=%s", "None" if embedding is None else f"list[{len(embedding)}]")
             if embedding is None:
                 continue
 
@@ -58,9 +60,11 @@ class OutputLengthPredictor:
             }
             df = pd.DataFrame([row])
             encoded = self._encoder.transform(df)
+            logger.info("Successful prediction from model")
+
             return int(self._model.predict(encoded)[0])
 
-        return 3  # fallback: mid-range bucket, degrades to near-FIFO
+        return 1  # fallback: mid-range bucket, degrades to near-FIFO
 
 
 class TaskInfo:
