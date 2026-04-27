@@ -40,6 +40,7 @@ class RequestInput:
     ignore_eos: bool = True
     encoder_fission: bool = False
     prompt_embedding: list[float] | None = None
+    image_count: int = 1
 
 
 @dataclass
@@ -275,6 +276,7 @@ async def cornserve_invoke(
             "encoder_fission": request_input.encoder_fission,
             "ignore_eos": request_input.ignore_eos,
             "prompt_embedding": request_input.prompt_embedding,
+            "image_count": request_input.image_count,
         }
 
         payload = {"request_data": request_data}

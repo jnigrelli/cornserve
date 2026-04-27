@@ -97,6 +97,7 @@ class OpenAIChatCompletionRequest(TaskInput):
     cornserve_kv_transfer_params: DataForward[dict] | None = None
     encoder_fission: bool = True  # not currently used
     prompt_embedding: list[float] | None = None  # pre-computed embedding for SJF prediction
+    image_count: int = 1  # number of images in request, used to weight SJF priority
 
 
 def extract_multimodal_content(

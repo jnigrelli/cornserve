@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import heapq
 import itertools
+import time
 import uuid
 from pathlib import Path
 from collections import defaultdict
@@ -37,34 +39,40 @@ class OutputLengthPredictor:
         logger.info("Loaded RLP model and encoder from %s", self._MODEL_DIR)
 
     def predict(self, invocations: list[TaskInvocation]) -> int:
-        """Return predicted output length bucket (1–6, lower = shorter = higher SJF priority)."""
+        """Return predicted output length bucket (1–6, lower = shorter = higher SJF priority).
+
+        Combines ML-predicted output length bucket with image count as a weighted penalty.
+        Each extra image beyond the first adds 2 to the priority score.
+        """
         import pandas as pd
 
         for inv in invocations:
             ti = inv.task_input
-            logger.info("Predictor: task_input type=%s has_prompt_embedding=%s", type(ti).__name__, hasattr(ti, "prompt_embedding"))
             embedding = ti.get("prompt_embedding") if isinstance(ti, dict) else getattr(ti, "prompt_embedding", None)
-            logger.info("Predictor: embedding=%s", "None" if embedding is None else f"list[{len(embedding)}]")
-            if embedding is None:
-                continue
+            image_count = ti.get("image_count", 1) if isinstance(ti, dict) else getattr(ti, "image_count", 1)
 
-            input_modality = ti.get("input_modality", "image") if isinstance(ti, dict) else getattr(ti, "input_modality", "image")
-            output_modality = ti.get("output_modality", "text") if isinstance(ti, dict) else getattr(ti, "output_modality", "text")
-            prompt_len = ti.get("prompt_len", 500) if isinstance(ti, dict) else getattr(ti, "prompt_len", 500)
+            ml_bucket = 1
+            if embedding is not None:
+                input_modality = ti.get("input_modality", "image") if isinstance(ti, dict) else getattr(ti, "input_modality", "image")
+                output_modality = ti.get("output_modality", "text") if isinstance(ti, dict) else getattr(ti, "output_modality", "text")
+                prompt_len = ti.get("prompt_len", 500) if isinstance(ti, dict) else getattr(ti, "prompt_len", 500)
 
-            row = {
-                "input_modality": input_modality,
-                "output_modality": output_modality,
-                "input_len_bucket": prompt_len,
-                **{f"emb_{i}": v for i, v in enumerate(embedding)},
-            }
-            df = pd.DataFrame([row])
-            encoded = self._encoder.transform(df)
-            logger.info("Successful prediction from model")
+                row = {
+                    "input_modality": input_modality,
+                    "output_modality": output_modality,
+                    "input_len_bucket": prompt_len,
+                    **{f"emb_{i}": v for i, v in enumerate(embedding)},
+                }
+                df = pd.DataFrame([row])
+                encoded = self._encoder.transform(df)
+                ml_bucket = int(self._model.predict(encoded)[0])
 
-            return int(self._model.predict(encoded)[0])
+            image_penalty = (image_count - 1) * 2
+            priority = ml_bucket + image_penalty
+            logger.info("Predicted priority=%d (ml_bucket=%d, image_count=%d, penalty=%d)", priority, ml_bucket, image_count, image_penalty)
+            return priority
 
-        return 1  # fallback: mid-range bucket, degrades to near-FIFO
+        return 1  # fallback: degrades to FIFO
 
 
 class TaskInfo:
@@ -131,13 +139,28 @@ def iter_data_forwards(obj: object) -> Iterator[DataForward]:
             yield from iter_data_forwards(getattr(obj, name))
 
 
+AGING_INTERVAL_SECS: float = 60.0   # reduce effective priority by 1 every N seconds of waiting
+AGING_MIN_PRIORITY: int = 1         # floor — no request can be boosted past highest priority
+
 @dataclass(order=True)
 class _SJFEntry:
-    """Priority queue entry. Ordered by (predicted_len, arrival_seq)."""
-    predicted_len: int
+    """Priority queue entry. Ordered by (effective_priority, arrival_seq).
+
+    effective_priority starts at original_priority and decreases over time (aging),
+    preventing starvation of heavy requests.
+    """
+    effective_priority: int
     arrival_seq: int
+    original_priority: int = field(compare=False)
+    enqueue_time: float = field(compare=False)
     invocations: list[TaskInvocation] = field(compare=False)
     future: asyncio.Future = field(compare=False)
+
+    def apply_aging(self, now: float) -> None:
+        """Decrease effective_priority based on time waited."""
+        age_secs = now - self.enqueue_time
+        decrement = int(age_secs / AGING_INTERVAL_SECS)
+        self.effective_priority = max(AGING_MIN_PRIORITY, self.original_priority - decrement)
 
 
 class TaskDispatcher:
@@ -156,7 +179,8 @@ class TaskDispatcher:
         )
 
         self.predictor = OutputLengthPredictor()
-        self._sjf_queue: asyncio.PriorityQueue[_SJFEntry] = asyncio.PriorityQueue()
+        self._sjf_heap: list[_SJFEntry] = []
+        self._heap_event: asyncio.Event = asyncio.Event()
         self._arrival_counter = itertools.count()
         self._worker: asyncio.Task | None = None
 
@@ -217,30 +241,50 @@ class TaskDispatcher:
         logger.info("Task dispatcher shutdown complete")
 
     async def _sjf_worker(self) -> None:
-        """Process one request at a time in shortest-predicted-length-first order."""
+        """Process requests in SJF order with aging to prevent starvation."""
         while True:
-            entry = await self._sjf_queue.get()
+            await self._heap_event.wait()
+            if not self._sjf_heap:
+                self._heap_event.clear()
+                continue
+
+            # Apply aging to all waiting entries, then re-heapify
+            now = time.monotonic()
+            for entry in self._sjf_heap:
+                entry.apply_aging(now)
+            heapq.heapify(self._sjf_heap)
+
+            entry = heapq.heappop(self._sjf_heap)
+            if not self._sjf_heap:
+                self._heap_event.clear()
+
+            wait_secs = now - entry.enqueue_time
+            logger.info(
+                "Dispatching entry original_priority=%d effective_priority=%d wait=%.1fs queue_remaining=%d",
+                entry.original_priority, entry.effective_priority, wait_secs, len(self._sjf_heap),
+            )
             try:
                 result = await self._dispatch(entry.invocations)
                 entry.future.set_result(result)
             except Exception as e:
                 entry.future.set_exception(e)
-            finally:
-                self._sjf_queue.task_done()
 
     @tracer.start_as_current_span("TaskDispatcher.invoke")
     async def invoke(self, invocations: list[TaskInvocation]) -> list[TaskOutput]:
-        """Enqueue invocations under SJF and block until the worker executes them."""
+        """Enqueue invocations under SJF with aging and block until the worker executes them."""
         predicted_len = self.predictor.predict(invocations)
         future: asyncio.Future[list[TaskOutput]] = asyncio.get_event_loop().create_future()
         entry = _SJFEntry(
-            predicted_len=predicted_len,
+            effective_priority=predicted_len,
             arrival_seq=next(self._arrival_counter),
+            original_priority=predicted_len,
+            enqueue_time=time.monotonic(),
             invocations=invocations,
             future=future,
         )
-        await self._sjf_queue.put(entry)
-        logger.info("Enqueued request with predicted_len=%d (queue size=%d)", predicted_len, self._sjf_queue.qsize())
+        heapq.heappush(self._sjf_heap, entry)
+        self._heap_event.set()
+        logger.info("Enqueued request with priority=%d (queue size=%d)", predicted_len, len(self._sjf_heap))
         return await future
 
     async def _dispatch(self, invocations: list[TaskInvocation]) -> list[TaskOutput]:
