@@ -156,7 +156,9 @@ class TaskDispatcher:
         )
 
         self.predictor = OutputLengthPredictor()
-        self._sjf_queue: asyncio.PriorityQueue[_SJFEntry] = asyncio.PriorityQueue()
+        self._light_queue: asyncio.PriorityQueue[_SJFEntry] = asyncio.PriorityQueue()
+        self._heavy_queue: asyncio.PriorityQueue[_SJFEntry] = asyncio.PriorityQueue()
+        self._tasks_available = asyncio.Semaphore(0)
         self._arrival_counter = itertools.count()
         self._worker: asyncio.Task | None = None
 
@@ -217,16 +219,31 @@ class TaskDispatcher:
         logger.info("Task dispatcher shutdown complete")
 
     async def _sjf_worker(self) -> None:
-        """Process one request at a time in shortest-predicted-length-first order."""
+       """Process requests using a 10:1 Light-to-Heavy duty cycle to prevent starvation."""
+        light_streak = 0
+        DUTY_CYCLE_LIMIT = 10
+
         while True:
-            entry = await self._sjf_queue.get()
+            await self._tasks_available.acquire()
+            if light_streak < DUTY_CYCLE_LIMIT and not self._light_queue.empty():
+                entry = self._light_queue.get_nowait()
+                light_streak += 1
+                self._light_queue.task_done()
+
+            elif not self._heavy_queue.empty():
+                entry = self._heavy_queue.get_nowait()
+                light_streak = 0  # Reset streak after processing a heavy task
+                self._heavy_queue.task_done()
+
+            else:
+                entry = self._light_queue.get_nowait()
+                light_streak += 1 
+                self._light_queue.task_done()
             try:
                 result = await self._dispatch(entry.invocations)
                 entry.future.set_result(result)
             except Exception as e:
                 entry.future.set_exception(e)
-            finally:
-                self._sjf_queue.task_done()
 
     @tracer.start_as_current_span("TaskDispatcher.invoke")
     async def invoke(self, invocations: list[TaskInvocation]) -> list[TaskOutput]:
@@ -239,7 +256,11 @@ class TaskDispatcher:
             invocations=invocations,
             future=future,
         )
-        await self._sjf_queue.put(entry)
+        if predicted_len <= 4:
+            self._light_queue.put_nowait(entry)
+        else:
+            self._heavy_queue.put_nowait(entry)
+        self._tasks_available.release()
         logger.info("Enqueued request with predicted_len=%d (queue size=%d)", predicted_len, self._sjf_queue.qsize())
         return await future
 
